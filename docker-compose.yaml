@@ -1,0 +1,9 @@
+services:
+  migrator:
+    build: .
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      # 挂载 ODBC 驱动目录
+      - /Users/kay/Documents/database/oscar/odbc:/opt/oscar/odbc:ro
+    environment:
+      - LD_LIBRARY_PATH=/opt/oscar/odbc/lib

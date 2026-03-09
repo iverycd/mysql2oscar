@@ -1,0 +1,35 @@
+# MySQL 到 Oscar 迁移工具配置示例
+
+# MySQL 源数据库配置
+source:
+  host: "192.168.1.200"
+  port: 3306
+  user: "root"
+  password: "Ge"
+  database: "a1"
+  charset: "utf8mb4"
+
+# Oscar 目标数据库配置
+target:
+  host: "192.168.2.2"
+  port: 2003
+  username: "test"
+  password: "Ge"
+  database: "osrdb"
+
+# 迁移配置
+migration:
+  # 要迁移的表列表，为空表示迁移整个数据库
+  tables:
+  #    - file_tbl
+  #    - scores
+  # 是否迁移视图
+  migrate_views: true
+  # 是否迁移索引
+  migrate_indexes: true
+  # 并行处理数
+  parallelism: 4
+  # 数据批处理大小
+  batch_size: 1000
+  # 是否覆盖已存在的表
+  overwrite: false
