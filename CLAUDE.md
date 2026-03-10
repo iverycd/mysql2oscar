@@ -74,10 +74,11 @@ source:
   charset: "utf8mb4"
 
 target:
-  dsn: "OscarDSN"           # ODBC 数据源名称
-  username: "oscar_user"
-  password: "oscar_password"
-  schema: "target_schema"
+  host: "192.168.189.200"
+  port: 2003
+  username: "test"
+  password: "Gepoint"
+  database: "osrdb"
 
 migration:
   tables: []                # 空=迁移所有表，或指定表名列表
@@ -88,64 +89,6 @@ migration:
   overwrite: false
 ```
 
-## ODBC 配置
-
-### macOS 环境配置步骤
-
-#### 1. 安装 unixODBC
-
-```bash
-brew install unixodbc
-```
-
-#### 2. 配置驱动 (`/usr/local/etc/odbcinst.ini`)
-
-```ini
-[Oscar]
-Description = Oscar Database ODBC Driver
-Driver      = /path/to/oscar/odbc/lib/liboscarodbcw.so
-Setup       = /path/to/oscar/odbc/lib/liboscarodbcw.so
-Threading   = 0
-```
-
-#### 3. 配置数据源 (`/usr/local/etc/odbc.ini`)
-
-```ini
-[OscarDSN]
-Description = Oscar Database Connection
-Driver      = Oscar
-Server      = 192.168.219.92
-Port        = 2003
-Database    = osrdb
-UserName    = test
-Password    = Gepoint
-```
-
-#### 4. 测试连接
-
-```bash
-isql -v OscarDSN test Gepoint
-```
-
-### 重要说明
-
-**Oscar ODBC 驱动兼容性问题：**
-- 当前驱动位于 `/Users/kay/Documents/database/oscar/odbc/`
-- 驱动文件是 **Linux ELF 格式**（`.so` 文件），无法直接在 macOS 上运行
-- macOS 需要 Mach-O 格式的 `.dylib` 文件
-
-### 运行方案
-
-由于驱动格式限制，推荐以下方案：
-
-#### 方案 A：Docker 容器运行（推荐）
-在 Linux 容器中运行迁移工具，可以使用现有的 Linux 驱动。
-
-#### 方案 B：获取 macOS 版驱动
-联系神通官方获取 macOS 版本的 ODBC 驱动。
-
-#### 方案 C：在 Linux 机器上运行
-编译 Linux 版本：`GOOS=linux GOARCH=amd64 go build -o mysql2oscar-linux ./cmd/mysql2oscar`
 
 ## Type Mapping (MySQL -> Oscar)
 
@@ -165,3 +108,29 @@ isql -v OscarDSN test Gepoint
 | DATE | DATE |
 | DATETIME/TIMESTAMP | TIMESTAMP |
 | ENUM/SET | VARCHAR(255) |
+
+## 迁移规则
+### 创建表
+创建表的时候不添加主键或者其他约束，在第二阶段完成之后再使用SQL语句ALTER TABLE 表名 ADD PRIMARY KEY(列名);
+
+### 字段名
+目标数据库的列字段名全部转成小写
+
+### comment注释
+在创建表的时候无需添加comment，在表创建成功之后再通过SQL语句添加comment
+
+- 添加表注释示例:COMMENT ON TABLE users IS '用户信息表';
+- 添加列注释示例:COMMENT ON COLUMN users.id IS '用户唯一标识符';
+
+### 行数据
+如果在第一阶段表结构创建失败的表，那么后续就不要再迁移数据以及索引等数据库对象
+
+### 自增列
+神通数据库的自增列需要先创建唯一索引再修改为自增列
+比如:
+create unique index 唯一索引名称 on 表名(自增列);
+ALTER TABLE 表名 ALTER TYPE 自增列 INT AUTO_INCREMENT;
+
+## 日志
+每次迁移创建一个log目录里面再按照时间戳比如2026_03_10_15_19_01，如果在迁移的时候表、索引、约束、外键、视图、序列、自增列、表数据分别
+生成tableCreateFailed.log,FkCreateFailed.log,idxCreateFailed.log,seqCreateFailed.log,viewCreateFailed.log,constraintFailed.log, errorTableData.log
