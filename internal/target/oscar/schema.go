@@ -89,10 +89,11 @@ func (w *SchemaWriter) CreateTable(table *types.Table) error {
 
 // CreateTableWithoutAutoIncr 创建表但不包含自增属性（用于神通数据库）
 // 神通数据库需要先创建表，再创建唯一索引，最后设置自增属性
-func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) error {
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) (string, error) {
 	// 检查列是否为空
 	if len(table.Columns) == 0 {
-		return fmt.Errorf("创建表 %s 失败: 表没有定义任何列", table.Name)
+		return "", fmt.Errorf("创建表 %s 失败: 表没有定义任何列", table.Name)
 	}
 
 	var sql strings.Builder
@@ -141,17 +142,20 @@ func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) error {
 		sql.WriteString(fmt.Sprintf(" COMMENT '%s'", table.Comment))
 	}
 
+	sqlStr := sql.String()
+
 	// 执行建表语句
-	_, err := w.client.Exec(sql.String())
+	_, err := w.client.Exec(sqlStr)
 	if err != nil {
-		return fmt.Errorf("创建表 %s 失败: %w", table.Name, err)
+		return sqlStr, fmt.Errorf("创建表 %s 失败: %w", table.Name, err)
 	}
 
-	return nil
+	return sqlStr, nil
 }
 
 // CreateAutoIncrUniqueIndex 为自增列创建唯一索引
-func (w *SchemaWriter) CreateAutoIncrUniqueIndex(tableName, columnName string) error {
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) CreateAutoIncrUniqueIndex(tableName, columnName string) (string, error) {
 	indexName := fmt.Sprintf("UK_%s_%s", tableName, columnName)
 	sql := fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s (%s)",
 		w.quoteIdentifier(indexName),
@@ -159,55 +163,81 @@ func (w *SchemaWriter) CreateAutoIncrUniqueIndex(tableName, columnName string) e
 		w.quoteIdentifier(columnName))
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return fmt.Errorf("创建自增列唯一索引失败: %w", err)
+		return sql, fmt.Errorf("创建自增列唯一索引失败: %w", err)
 	}
 
-	return nil
+	return sql, nil
 }
 
 // SetColumnAutoIncrement 设置列为自增列
-func (w *SchemaWriter) SetColumnAutoIncrement(tableName, columnName string) error {
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) SetColumnAutoIncrement(tableName, columnName string) (string, error) {
 	// 神通数据库语法：ALTER TABLE 表名 ALTER TYPE 列名 INT AUTO_INCREMENT
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER TYPE %s INT AUTO_INCREMENT",
 		w.quoteIdentifier(tableName),
 		w.quoteIdentifier(columnName))
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return fmt.Errorf("设置自增属性失败: %w", err)
+		return sql, fmt.Errorf("设置自增属性失败: %w", err)
 	}
 
-	return nil
+	return sql, nil
 }
 
 // CreateIndexes 创建索引
-func (w *SchemaWriter) CreateIndexes(tableName string, indexes []types.Index) error {
+// 返回失败的索引信息列表（索引名, SQL, 错误）
+func (w *SchemaWriter) CreateIndexes(tableName string, indexes []types.Index) []IndexError {
+	var failedIndexes []IndexError
+
 	for _, idx := range indexes {
 		if idx.IsPrimary {
 			continue // 主键在建表时已创建
 		}
 
-		cols := make([]string, len(idx.Columns))
-		for i, c := range idx.Columns {
-			cols[i] = w.quoteIdentifier(c)
-		}
-
-		indexType := "INDEX"
-		if idx.IsUnique {
-			indexType = "UNIQUE INDEX"
-		}
-
-		sql := fmt.Sprintf("CREATE %s %s ON %s (%s)",
-			indexType,
-			w.quoteIdentifier(idx.Name),
-			w.quoteIdentifier(tableName),
-			strings.Join(cols, ", "))
-
-		if _, err := w.client.Exec(sql); err != nil {
-			return fmt.Errorf("创建索引 %s 失败: %w", idx.Name, err)
+		sql, err := w.CreateSingleIndex(tableName, idx)
+		if err != nil {
+			failedIndexes = append(failedIndexes, IndexError{
+				IndexName: idx.Name,
+				SQL:       sql,
+				Err:       err,
+			})
 		}
 	}
 
-	return nil
+	return failedIndexes
+}
+
+// IndexError 索引创建错误信息
+type IndexError struct {
+	IndexName string
+	SQL       string
+	Err       error
+}
+
+// CreateSingleIndex 创建单个索引
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) CreateSingleIndex(tableName string, idx types.Index) (string, error) {
+	cols := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
+		cols[i] = w.quoteIdentifier(c)
+	}
+
+	indexType := "INDEX"
+	if idx.IsUnique {
+		indexType = "UNIQUE INDEX"
+	}
+
+	sql := fmt.Sprintf("CREATE %s %s ON %s (%s)",
+		indexType,
+		w.quoteIdentifier(idx.Name),
+		w.quoteIdentifier(tableName),
+		strings.Join(cols, ", "))
+
+	if _, err := w.client.Exec(sql); err != nil {
+		return sql, fmt.Errorf("创建索引 %s 失败: %w", idx.Name, err)
+	}
+
+	return sql, nil
 }
 
 // CreateForeignKeys 创建外键
@@ -246,7 +276,8 @@ func (w *SchemaWriter) CreateForeignKeys(tableName string, fks []types.ForeignKe
 }
 
 // CreateSingleForeignKey 创建单个外键
-func (w *SchemaWriter) CreateSingleForeignKey(tableName string, fk types.ForeignKey) error {
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) CreateSingleForeignKey(tableName string, fk types.ForeignKey) (string, error) {
 	cols := make([]string, len(fk.Columns))
 	for i, c := range fk.Columns {
 		cols[i] = w.quoteIdentifier(c)
@@ -272,23 +303,24 @@ func (w *SchemaWriter) CreateSingleForeignKey(tableName string, fk types.Foreign
 	}
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return fmt.Errorf("创建外键 %s 失败: %w", fk.Name, err)
+		return sql, fmt.Errorf("创建外键 %s 失败: %w", fk.Name, err)
 	}
 
-	return nil
+	return sql, nil
 }
 
 // CreateView 创建视图
-func (w *SchemaWriter) CreateView(view *types.View) error {
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) CreateView(view *types.View) (string, error) {
 	sql := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s",
 		w.quoteIdentifier(view.Name),
 		view.Definition)
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return fmt.Errorf("创建视图 %s 失败: %w", view.Name, err)
+		return sql, fmt.Errorf("创建视图 %s 失败: %w", view.Name, err)
 	}
 
-	return nil
+	return sql, nil
 }
 
 // convertType 将 MySQL 类型转换为 Oscar 类型

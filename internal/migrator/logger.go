@@ -22,6 +22,7 @@ type Logger struct {
 	seqCreateFailed   *logFile // 序列创建失败日志
 	viewCreateFailed  *logFile // 视图创建失败日志
 	autoIncrFailed    *logFile // 自增列创建失败日志
+	constraintFailed  *logFile // 约束创建失败日志
 	errorTableData    *logFile // 表数据迁移错误日志
 
 	mu sync.Mutex
@@ -60,6 +61,7 @@ func NewLogger() (*Logger, error) {
 	l.seqCreateFailed = l.createLogFile("seqCreateFailed.log")
 	l.viewCreateFailed = l.createLogFile("viewCreateFailed.log")
 	l.autoIncrFailed = l.createLogFile("autoIncrFailed.log")
+	l.constraintFailed = l.createLogFile("constraintFailed.log")
 	l.errorTableData = l.createLogFile("errorTableData.log")
 
 	return l, nil
@@ -82,72 +84,82 @@ func (l *Logger) createLogFile(filename string) *logFile {
 }
 
 // LogTableCreateFailed 记录表结构创建失败
-func (l *Logger) LogTableCreateFailed(tableName, reason string) {
+func (l *Logger) LogTableCreateFailed(tableName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("表 %s 创建失败: %s", tableName, reason)
-	log.Printf("[表结构失败] %s", msg)
+	msg := fmt.Sprintf("表 %s 创建失败\n%s\n%s", tableName, sql, reason)
+	log.Printf("[表结构失败] %s", reason)
 	l.writeLog(l.tableCreateFailed, msg)
 }
 
 // LogFkCreateFailed 记录外键创建失败
-func (l *Logger) LogFkCreateFailed(tableName, fkName, reason string) {
+func (l *Logger) LogFkCreateFailed(tableName, fkName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("表 %s 外键 %s 创建失败: %s", tableName, fkName, reason)
-	log.Printf("[外键失败] %s", msg)
+	msg := fmt.Sprintf("表 %s 外键 %s 创建失败\nSQL: %s\n原因: %s", tableName, fkName, sql, reason)
+	log.Printf("[外键失败] 表 %s 外键 %s 创建失败: %s", tableName, fkName, reason)
 	l.writeLog(l.fkCreateFailed, msg)
 }
 
 // LogIndexCreateFailed 记录索引创建失败
-func (l *Logger) LogIndexCreateFailed(tableName, idxName, reason string) {
+func (l *Logger) LogIndexCreateFailed(tableName, idxName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("表 %s 索引 %s 创建失败: %s", tableName, idxName, reason)
-	log.Printf("[索引失败] %s", msg)
+	msg := fmt.Sprintf("表 %s 索引 %s 创建失败\nSQL: %s\n原因: %s", tableName, idxName, sql, reason)
+	log.Printf("[索引失败] 表 %s 索引 %s 创建失败: %s", tableName, idxName, reason)
 	l.writeLog(l.idxCreateFailed, msg)
 }
 
 // LogSeqCreateFailed 记录序列创建失败
-func (l *Logger) LogSeqCreateFailed(seqName, reason string) {
+func (l *Logger) LogSeqCreateFailed(seqName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("序列 %s 创建失败: %s", seqName, reason)
-	log.Printf("[序列失败] %s", msg)
+	msg := fmt.Sprintf("序列 %s 创建失败\nSQL: %s\n原因: %s", seqName, sql, reason)
+	log.Printf("[序列失败] 序列 %s 创建失败: %s", seqName, reason)
 	l.writeLog(l.seqCreateFailed, msg)
 }
 
 // LogViewCreateFailed 记录视图创建失败
-func (l *Logger) LogViewCreateFailed(viewName, reason string) {
+func (l *Logger) LogViewCreateFailed(viewName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("视图 %s 创建失败: %s", viewName, reason)
-	log.Printf("[视图失败] %s", msg)
+	msg := fmt.Sprintf("视图 %s 创建失败\nSQL: %s\n原因: %s", viewName, sql, reason)
+	log.Printf("[视图失败] 视图 %s 创建失败: %s", viewName, reason)
 	l.writeLog(l.viewCreateFailed, msg)
 }
 
 // LogAutoIncrFailed 记录自增列创建失败
-func (l *Logger) LogAutoIncrFailed(tableName, columnName, reason string) {
+func (l *Logger) LogAutoIncrFailed(tableName, columnName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("表 %s 自增列 %s 设置失败: %s", tableName, columnName, reason)
-	log.Printf("[自增列失败] %s", msg)
+	msg := fmt.Sprintf("表 %s 自增列 %s 设置失败\nSQL: %s\n原因: %s", tableName, columnName, sql, reason)
+	log.Printf("[自增列失败] 表 %s 自增列 %s 设置失败: %s", tableName, columnName, reason)
 	l.writeLog(l.autoIncrFailed, msg)
 }
 
-// LogTableDataError 记录表数据迁移错误
-func (l *Logger) LogTableDataError(tableName, reason string) {
+// LogConstraintFailed 记录约束创建失败
+func (l *Logger) LogConstraintFailed(tableName, constraintName, sql, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	msg := fmt.Sprintf("表 %s 数据迁移失败: %s", tableName, reason)
-	log.Printf("[数据失败] %s", msg)
+	msg := fmt.Sprintf("表 %s 约束 %s 创建失败\nSQL: %s\n原因: %s", tableName, constraintName, sql, reason)
+	log.Printf("[约束失败] 表 %s 约束 %s 创建失败: %s", tableName, constraintName, reason)
+	l.writeLog(l.constraintFailed, msg)
+}
+
+// LogTableDataError 记录表数据迁移错误
+func (l *Logger) LogTableDataError(tableName, sql, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	msg := fmt.Sprintf("表 %s 数据迁移失败\nSQL: %s\n原因: %s", tableName, sql, reason)
+	log.Printf("[数据失败] 表 %s 数据迁移失败: %s", tableName, reason)
 	l.writeLog(l.errorTableData, msg)
 }
 
@@ -181,6 +193,7 @@ func (l *Logger) Close() error {
 	closeFile(l.seqCreateFailed, "seqCreateFailed.log")
 	closeFile(l.viewCreateFailed, "viewCreateFailed.log")
 	closeFile(l.autoIncrFailed, "autoIncrFailed.log")
+	closeFile(l.constraintFailed, "constraintFailed.log")
 	closeFile(l.errorTableData, "errorTableData.log")
 
 	if len(errs) > 0 {

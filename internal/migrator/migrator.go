@@ -179,7 +179,7 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			result.TablesFailed++
 			result.FailedTables = append(result.FailedTables, tableName)
 			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, fmt.Sprintf("读取表结构失败: %v", err))
+			m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("读取表结构失败: %v", err))
 			continue
 		}
 
@@ -202,7 +202,7 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			result.TablesFailed++
 			result.FailedTables = append(result.FailedTables, tableName)
 			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, fmt.Sprintf("检查表是否存在失败: %v", err))
+			m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("检查表是否存在失败: %v", err))
 			continue
 		}
 
@@ -212,24 +212,26 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 					result.TablesFailed++
 					result.FailedTables = append(result.FailedTables, tableName)
 					m.failedTableCreate[tableName] = true
-					m.logger.LogTableCreateFailed(tableName, fmt.Sprintf("删除已存在的表失败: %v", err))
+					dropSQL := fmt.Sprintf("DROP TABLE %s", tableName)
+					m.logger.LogTableCreateFailed(tableName, dropSQL, fmt.Sprintf("删除已存在的表失败: %v", err))
 					continue
 				}
 			} else {
 				result.TablesFailed++
 				result.FailedTables = append(result.FailedTables, tableName)
 				m.failedTableCreate[tableName] = true
-				m.logger.LogTableCreateFailed(tableName, "表已存在")
+				m.logger.LogTableCreateFailed(tableName, "", "表已存在")
 				continue
 			}
 		}
 
 		// 3. 创建表结构（不包含自增属性，稍后单独处理）
-		if err := m.schemaWriter.CreateTableWithoutAutoIncr(table); err != nil {
+		sql, err := m.schemaWriter.CreateTableWithoutAutoIncr(table)
+		if err != nil {
 			result.TablesFailed++
 			result.FailedTables = append(result.FailedTables, tableName)
 			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, fmt.Sprintf("创建表失败: %v", err))
+			m.logger.LogTableCreateFailed(tableName, sql, fmt.Sprintf("%v", err))
 			continue
 		}
 
@@ -296,7 +298,7 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		if r.err != nil {
 			result.TablesFailed++
 			result.FailedTables = append(result.FailedTables, r.tableName)
-			m.logger.LogTableDataError(r.tableName, r.err.Error())
+			m.logger.LogTableDataError(r.tableName, "", r.err.Error())
 		} else {
 			result.TablesMigrated++
 			result.TotalRows += r.rowCount
@@ -325,18 +327,23 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 
 		// 创建索引
 		if m.cfg.Migration.MigrateIndexes && len(table.Indexes) > 0 {
-			if err := m.schemaWriter.CreateIndexes(tableName, table.Indexes); err != nil {
-				m.logger.LogIndexCreateFailed(tableName, "多个索引", err.Error())
-			} else {
+			failedIndexes := m.schemaWriter.CreateIndexes(tableName, table.Indexes)
+			for _, fi := range failedIndexes {
+				m.logger.LogIndexCreateFailed(tableName, fi.IndexName, fi.SQL, fi.Err.Error())
+			}
+			if len(failedIndexes) == 0 {
 				log.Printf("[完成] 表 %s: 创建了 %d 个索引", tableName, len(table.Indexes))
+			} else {
+				log.Printf("[部分完成] 表 %s: 成功 %d 个索引, 失败 %d 个索引", tableName, len(table.Indexes)-len(failedIndexes), len(failedIndexes))
 			}
 		}
 
 		// 创建外键
 		if len(table.ForeignKeys) > 0 {
 			for _, fk := range table.ForeignKeys {
-				if err := m.schemaWriter.CreateSingleForeignKey(tableName, fk); err != nil {
-					m.logger.LogFkCreateFailed(tableName, fk.Name, err.Error())
+				sql, err := m.schemaWriter.CreateSingleForeignKey(tableName, fk)
+				if err != nil {
+					m.logger.LogFkCreateFailed(tableName, fk.Name, sql, err.Error())
 				}
 			}
 			log.Printf("[完成] 表 %s: 处理了 %d 个外键", tableName, len(table.ForeignKeys))
@@ -355,14 +362,16 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		log.Printf("[处理] 表 %s 自增列 %s", ai.tableName, ai.columnName)
 
 		// 1. 先为自增列创建唯一索引
-		if err := m.schemaWriter.CreateAutoIncrUniqueIndex(ai.tableName, ai.columnName); err != nil {
-			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, fmt.Sprintf("创建唯一索引失败: %v", err))
+		sql, err := m.schemaWriter.CreateAutoIncrUniqueIndex(ai.tableName, ai.columnName)
+		if err != nil {
+			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("创建唯一索引失败: %v", err))
 			continue
 		}
 
 		// 2. 修改列为自增列
-		if err := m.schemaWriter.SetColumnAutoIncrement(ai.tableName, ai.columnName); err != nil {
-			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, fmt.Sprintf("设置自增属性失败: %v", err))
+		sql, err = m.schemaWriter.SetColumnAutoIncrement(ai.tableName, ai.columnName)
+		if err != nil {
+			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("设置自增属性失败: %v", err))
 			continue
 		}
 
@@ -418,7 +427,7 @@ func (m *Migrator) migrateViews() *types.MigrationResult {
 		if err != nil {
 			result.ViewsFailed++
 			result.FailedViews = append(result.FailedViews, viewName)
-			m.logger.LogViewCreateFailed(viewName, fmt.Sprintf("获取视图定义失败: %v", err))
+			m.logger.LogViewCreateFailed(viewName, "", fmt.Sprintf("获取视图定义失败: %v", err))
 			continue
 		}
 
@@ -432,10 +441,11 @@ func (m *Migrator) migrateViews() *types.MigrationResult {
 		}
 
 		// 创建视图
-		if err := m.schemaWriter.CreateView(view); err != nil {
+		sql, err := m.schemaWriter.CreateView(view)
+		if err != nil {
 			result.ViewsFailed++
 			result.FailedViews = append(result.FailedViews, viewName)
-			m.logger.LogViewCreateFailed(viewName, err.Error())
+			m.logger.LogViewCreateFailed(viewName, sql, err.Error())
 			continue
 		}
 
