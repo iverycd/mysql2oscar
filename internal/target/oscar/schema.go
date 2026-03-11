@@ -354,7 +354,10 @@ func (w *SchemaWriter) convertType(mysqlType string) string {
 	case "FLOAT":
 		return "FLOAT"
 	case "DOUBLE":
-		return "DOUBLE"
+		if size != "" {
+			return "DECIMAL" + size
+		}
+		return "DECIMAL(22,6)"
 	case "DECIMAL":
 		if size != "" {
 			return "DECIMAL" + size
