@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "go-aci"
@@ -81,13 +82,16 @@ func (c *Client) Begin() (*sql.Tx, error) {
 
 // TableExists 检查表是否存在
 func (c *Client) TableExists(tableName string) (bool, error) {
+	// 统一转为小写的表名与目标数据库进行比对
+	lowerTableName := strings.ToUpper(tableName)
+
 	query := `
 		SELECT COUNT(*)
 		FROM USER_TABLES
-		WHERE TABLE_NAME = :1
+		WHERE lower(TABLE_NAME) = :1
 	`
 	var count int
-	err := c.QueryRow(query, tableName).Scan(&count)
+	err := c.QueryRow(query, lowerTableName).Scan(&count)
 	if err != nil {
 		// 如果系统表查询失败，尝试其他方式
 		query = fmt.Sprintf("SELECT 1 FROM %s WHERE 1=0", c.quoteIdentifier(tableName))

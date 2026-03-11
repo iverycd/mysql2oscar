@@ -196,27 +196,28 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			}
 		}
 
-		// 2. 检查/删除已存在的表
-		exists, err := m.oscarClient.TableExists(tableName)
-		if err != nil {
-			result.TablesFailed++
-			result.FailedTables = append(result.FailedTables, tableName)
-			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("检查表是否存在失败: %v", err))
-			continue
-		}
-
-		if exists {
-			if m.cfg.Migration.Overwrite {
-				if err := m.oscarClient.DropTable(tableName); err != nil {
-					result.TablesFailed++
-					result.FailedTables = append(result.FailedTables, tableName)
-					m.failedTableCreate[tableName] = true
-					dropSQL := fmt.Sprintf("DROP TABLE %s", tableName)
-					m.logger.LogTableCreateFailed(tableName, dropSQL, fmt.Sprintf("删除已存在的表失败: %v", err))
-					continue
-				}
-			} else {
+		// 2. 处理已存在的表
+		if m.cfg.Migration.Overwrite {
+			// 配置了 overwrite，直接删除表（IF EXISTS 会自动处理不存在的情况）
+			if err := m.oscarClient.DropTable(tableName); err != nil {
+				result.TablesFailed++
+				result.FailedTables = append(result.FailedTables, tableName)
+				m.failedTableCreate[tableName] = true
+				dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName)
+				m.logger.LogTableCreateFailed(tableName, dropSQL, fmt.Sprintf("删除表失败: %v", err))
+				continue
+			}
+		} else {
+			// 未配置 overwrite，检查表是否存在
+			exists, err := m.oscarClient.TableExists(tableName)
+			if err != nil {
+				result.TablesFailed++
+				result.FailedTables = append(result.FailedTables, tableName)
+				m.failedTableCreate[tableName] = true
+				m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("检查表是否存在失败: %v", err))
+				continue
+			}
+			if exists {
 				result.TablesFailed++
 				result.FailedTables = append(result.FailedTables, tableName)
 				m.failedTableCreate[tableName] = true
