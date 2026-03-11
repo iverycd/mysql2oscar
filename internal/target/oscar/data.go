@@ -134,7 +134,7 @@ func (w *DataWriter) GetRowCount(tableName string) (int64, error) {
 	return count, nil
 }
 
-// quoteIdentifier 引用标识符
+// quoteIdentifier 引用标识符（转为小写）
 func (w *DataWriter) quoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
 }

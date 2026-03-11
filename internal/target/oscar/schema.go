@@ -411,7 +411,7 @@ func (w *SchemaWriter) formatDefault(value string) string {
 	return fmt.Sprintf("'%s'", strings.ReplaceAll(value, "'", "''"))
 }
 
-// quoteIdentifier 引用标识符
+// quoteIdentifier 引用标识符（转为小写）
 func (w *SchemaWriter) quoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
 }

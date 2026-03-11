@@ -118,8 +118,8 @@ func (c *Client) DropView(viewName string) error {
 	return err
 }
 
-// quoteIdentifier 引用标识符
+// quoteIdentifier 引用标识符（转为小写）
 func (c *Client) quoteIdentifier(name string) string {
 	// Oscar 使用双引号引用标识符
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
 }
