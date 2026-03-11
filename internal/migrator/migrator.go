@@ -235,6 +235,20 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			continue
 		}
 
+		// 4. 添加表注释
+		if table.Comment != "" {
+			_, err := m.schemaWriter.AddTableComment(tableName, table.Comment)
+			if err != nil {
+				log.Printf("[警告] 表 %s: 添加表注释失败: %v", tableName, err)
+			}
+		}
+
+		// 5. 添加列注释
+		failedColComments := m.schemaWriter.AddColumnComments(tableName, table.Columns)
+		if len(failedColComments) > 0 {
+			log.Printf("[警告] 表 %s: %d 个列注释添加失败", tableName, len(failedColComments))
+		}
+
 		log.Printf("[完成] 表 %s: 表结构创建成功", tableName)
 	}
 

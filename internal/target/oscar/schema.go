@@ -51,9 +51,7 @@ func (w *SchemaWriter) CreateTable(table *types.Table) error {
 			sql.WriteString(fmt.Sprintf(" DEFAULT %s", w.formatDefault(*col.DefaultValue)))
 		}
 
-		if col.Comment != "" {
-			sql.WriteString(fmt.Sprintf(" COMMENT '%s'", col.Comment))
-		}
+		// 注意：神通数据库不支持在建表时添加 COMMENT，需要在表创建后单独添加
 
 		if i < len(table.Columns)-1 {
 			sql.WriteString(",\n")
@@ -73,10 +71,7 @@ func (w *SchemaWriter) CreateTable(table *types.Table) error {
 
 	sql.WriteString("\n)")
 
-	// 表注释
-	if table.Comment != "" {
-		sql.WriteString(fmt.Sprintf(" COMMENT '%s'", table.Comment))
-	}
+	// 注意：神通数据库不支持在建表时添加表注释，需要在表创建后单独添加
 
 	// 执行建表语句
 	_, err := w.client.Exec(sql.String())
@@ -115,9 +110,7 @@ func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) (string, e
 			sql.WriteString(fmt.Sprintf(" DEFAULT %s", w.formatDefault(*col.DefaultValue)))
 		}
 
-		if col.Comment != "" {
-			sql.WriteString(fmt.Sprintf(" COMMENT '%s'", col.Comment))
-		}
+		// 注意：神通数据库不支持在建表时添加 COMMENT，需要在表创建后单独添加
 
 		if i < len(table.Columns)-1 {
 			sql.WriteString(",\n")
@@ -137,10 +130,7 @@ func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) (string, e
 
 	sql.WriteString("\n)")
 
-	// 表注释
-	if table.Comment != "" {
-		sql.WriteString(fmt.Sprintf(" COMMENT '%s'", table.Comment))
-	}
+	// 注意：神通数据库不支持在建表时添加表注释，需要在表创建后单独添加
 
 	sqlStr := sql.String()
 
@@ -307,6 +297,73 @@ func (w *SchemaWriter) CreateSingleForeignKey(tableName string, fk types.Foreign
 	}
 
 	return sql, nil
+}
+
+// AddTableComment 添加表注释
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) AddTableComment(tableName, comment string) (string, error) {
+	if comment == "" {
+		return "", nil
+	}
+
+	sql := fmt.Sprintf("COMMENT ON TABLE %s IS '%s'",
+		w.quoteIdentifier(tableName),
+		strings.ReplaceAll(comment, "'", "''"))
+
+	if _, err := w.client.Exec(sql); err != nil {
+		return sql, fmt.Errorf("添加表注释失败: %w", err)
+	}
+
+	return sql, nil
+}
+
+// AddColumnComment 添加列注释
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) AddColumnComment(tableName, columnName, comment string) (string, error) {
+	if comment == "" {
+		return "", nil
+	}
+
+	sql := fmt.Sprintf("COMMENT ON COLUMN %s.%s IS '%s'",
+		w.quoteIdentifier(tableName),
+		w.quoteIdentifier(columnName),
+		strings.ReplaceAll(comment, "'", "''"))
+
+	if _, err := w.client.Exec(sql); err != nil {
+		return sql, fmt.Errorf("添加列注释失败: %w", err)
+	}
+
+	return sql, nil
+}
+
+// AddColumnComments 批量添加列注释
+// 返回失败的列注释信息列表（列名, SQL, 错误）
+func (w *SchemaWriter) AddColumnComments(tableName string, columns []types.Column) []ColumnCommentError {
+	var failedComments []ColumnCommentError
+
+	for _, col := range columns {
+		if col.Comment == "" {
+			continue
+		}
+
+		sql, err := w.AddColumnComment(tableName, col.Name, col.Comment)
+		if err != nil {
+			failedComments = append(failedComments, ColumnCommentError{
+				ColumnName: col.Name,
+				SQL:        sql,
+				Err:        err,
+			})
+		}
+	}
+
+	return failedComments
+}
+
+// ColumnCommentError 列注释错误信息
+type ColumnCommentError struct {
+	ColumnName string
+	SQL        string
+	Err        error
 }
 
 // CreateView 创建视图
