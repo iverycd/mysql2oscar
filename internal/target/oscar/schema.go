@@ -52,17 +52,6 @@ func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) (string, e
 		}
 	}
 
-	// 主键
-	for _, idx := range table.Indexes {
-		if idx.IsPrimary {
-			cols := make([]string, len(idx.Columns))
-			for i, c := range idx.Columns {
-				cols[i] = w.quoteIdentifier(c)
-			}
-			sql.WriteString(fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(cols, ", ")))
-		}
-	}
-
 	sql.WriteString("\n)")
 
 	// 注意：神通数据库不支持在建表时添加表注释，需要在表创建后单独添加
@@ -76,6 +65,30 @@ func (w *SchemaWriter) CreateTableWithoutAutoIncr(table *types.Table) (string, e
 	}
 
 	return sqlStr, nil
+}
+
+// AddPrimaryKey 添加主键约束
+// 在表创建完成后，使用 ALTER TABLE 添加主键
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) AddPrimaryKey(tableName string, columns []string) (string, error) {
+	if len(columns) == 0 {
+		return "", nil
+	}
+
+	cols := make([]string, len(columns))
+	for i, c := range columns {
+		cols[i] = w.quoteIdentifier(c)
+	}
+
+	sql := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)",
+		w.quoteIdentifier(tableName),
+		strings.Join(cols, ", "))
+
+	if _, err := w.client.Exec(sql); err != nil {
+		return sql, fmt.Errorf("添加主键失败: %w", err)
+	}
+
+	return sql, nil
 }
 
 // CreateAutoIncrUniqueIndex 为自增列创建唯一索引

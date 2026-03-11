@@ -111,7 +111,7 @@ migration:
 
 ## 迁移规则
 ### 创建表
-创建表的时候不添加主键或者其他约束，在第二阶段完成之后再使用SQL语句ALTER TABLE 表名 ADD PRIMARY KEY(列名);
+创建表的时候不添加主键或者其他约束，在第二阶段完成之后再使用SQL语句新增主键ALTER TABLE 表名 ADD PRIMARY KEY(列名);
 
 ### 字段名
 目标数据库的列字段名全部转成小写

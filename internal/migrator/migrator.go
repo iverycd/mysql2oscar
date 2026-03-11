@@ -340,6 +340,19 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		table := tableSchemas[tableName]
 		log.Printf("[%d/%d] 创建索引和外键: %s", i+1, len(successTables), tableName)
 
+		// 添加主键（在数据迁移完成后）
+		for _, idx := range table.Indexes {
+			if idx.IsPrimary {
+				sql, err := m.schemaWriter.AddPrimaryKey(tableName, idx.Columns)
+				if err != nil {
+					m.logger.LogIndexCreateFailed(tableName, "PRIMARY", sql, err.Error())
+				} else {
+					log.Printf("[完成] 表 %s: 添加主键 (%s)", tableName, idx.Name)
+				}
+				break // 每个表只有一个主键
+			}
+		}
+
 		// 创建索引
 		if m.cfg.Migration.MigrateIndexes && len(table.Indexes) > 0 {
 			failedIndexes := m.schemaWriter.CreateIndexes(tableName, table.Indexes)
