@@ -2,7 +2,9 @@ package oscar
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
+	"time"
 
 	"mysql2oscar/pkg/types"
 )
@@ -165,9 +167,12 @@ func (w *SchemaWriter) CreateSingleIndex(tableName string, idx types.Index) (str
 		indexType = "UNIQUE INDEX"
 	}
 
+	// 生成新的索引名称：idx_表名前8字符_列名前5字符_3位随机数字
+	newIndexName := w.generateIndexName(tableName, idx.Columns[0])
+
 	sql := fmt.Sprintf("CREATE %s %s ON %s (%s)",
 		indexType,
-		w.quoteIdentifier(idx.Name),
+		w.quoteIdentifier(newIndexName),
 		w.quoteIdentifier(tableName),
 		strings.Join(cols, ", "))
 
@@ -430,4 +435,27 @@ func (w *SchemaWriter) formatDefault(value string) string {
 // quoteIdentifier 引用标识符（转为小写）
 func (w *SchemaWriter) quoteIdentifier(name string) string {
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
+}
+
+// generateIndexName 生成索引名称
+// 格式：idx_表名前8字符_列名前5字符_3位随机数字
+func (w *SchemaWriter) generateIndexName(tableName, columnName string) string {
+	// 截取表名前8个字符
+	tablePrefix := tableName
+	if len(tablePrefix) > 8 {
+		tablePrefix = tablePrefix[:8]
+	}
+
+	// 截取列名前5个字符
+	colPrefix := columnName
+	if len(colPrefix) > 5 {
+		colPrefix = colPrefix[:5]
+	}
+
+	// 生成3位随机数字
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomNum := r.Intn(1000)
+
+	// 转为小写
+	return fmt.Sprintf("idx_%s_%s_%03d", strings.ToLower(tablePrefix), strings.ToLower(colPrefix), randomNum)
 }
