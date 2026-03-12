@@ -14,7 +14,8 @@ type Client struct {
 }
 
 // NewClient 创建 MySQL 客户端
-func NewClient(host string, port int, user, password, database, charset string) (*Client, error) {
+// maxConns: 最大连接数，应设置为 parallelism + 缓冲
+func NewClient(host string, port int, user, password, database, charset string, maxConns int) (*Client, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=true&loc=Local",
 		user, password, host, port, database, charset)
 
@@ -28,9 +29,9 @@ func NewClient(host string, port int, user, password, database, charset string) 
 		return nil, fmt.Errorf("MySQL 连接测试失败: %w", err)
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	// 设置连接池参数（根据 parallelism 动态调整）
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns / 2)
 
 	return &Client{
 		db:     db,

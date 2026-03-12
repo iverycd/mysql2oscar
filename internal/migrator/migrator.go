@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mysql2oscar/internal/config"
@@ -27,8 +28,9 @@ type Migrator struct {
 	logger        *Logger // 日志管理器
 
 	// 迁移过程跟踪
-	failedTableCreate map[string]bool // 表结构创建失败的表
-	autoIncrColumns   []autoIncrInfo  // 需要设置自增的列信息
+	failedTableCreate sync.Map       // 表结构创建失败的表（线程安全）
+	autoIncrColumns   []autoIncrInfo // 需要设置自增的列信息
+	autoIncrMutex     sync.Mutex     // 保护 autoIncrColumns
 }
 
 // autoIncrInfo 自增列信息
@@ -46,6 +48,9 @@ func New(cfg *config.Config) (*Migrator, error) {
 		return nil, fmt.Errorf("创建日志管理器失败: %w", err)
 	}
 
+	// 计算连接池大小：parallelism + 缓冲
+	maxConns := cfg.Migration.Parallelism + 5
+
 	// 创建 MySQL 客户端
 	mysqlClient, err := mysql.NewClient(
 		cfg.Source.Host,
@@ -54,6 +59,7 @@ func New(cfg *config.Config) (*Migrator, error) {
 		cfg.Source.Password,
 		cfg.Source.Database,
 		cfg.Source.Charset,
+		maxConns,
 	)
 	if err != nil {
 		logger.Close()
@@ -67,6 +73,7 @@ func New(cfg *config.Config) (*Migrator, error) {
 		cfg.Target.Password,
 		cfg.Target.Database,
 		cfg.Target.Port,
+		maxConns,
 	)
 	if err != nil {
 		mysqlClient.Close()
@@ -75,18 +82,17 @@ func New(cfg *config.Config) (*Migrator, error) {
 	}
 
 	return &Migrator{
-		cfg:               cfg,
-		mysqlClient:       mysqlClient,
-		oscarClient:       oscarClient,
-		schemaReader:      mysql.NewSchemaReader(mysqlClient),
-		dataReader:        mysql.NewDataReader(mysqlClient, cfg.Migration.BatchSize),
-		schemaWriter:      oscar.NewSchemaWriter(oscarClient),
-		dataWriter:        oscar.NewDataWriter(oscarClient),
-		typeMapper:        transform.NewTypeMapper(),
-		viewConverter:     transform.NewViewConverter(),
-		logger:            logger,
-		failedTableCreate: make(map[string]bool),
-		autoIncrColumns:   make([]autoIncrInfo, 0),
+		cfg:             cfg,
+		mysqlClient:     mysqlClient,
+		oscarClient:     oscarClient,
+		schemaReader:    mysql.NewSchemaReader(mysqlClient),
+		dataReader:      mysql.NewDataReader(mysqlClient, cfg.Migration.BatchSize),
+		schemaWriter:    oscar.NewSchemaWriter(oscarClient),
+		dataWriter:      oscar.NewDataWriter(oscarClient),
+		typeMapper:      transform.NewTypeMapper(),
+		viewConverter:   transform.NewViewConverter(),
+		logger:          logger,
+		autoIncrColumns: make([]autoIncrInfo, 0),
 	}, nil
 }
 
@@ -162,12 +168,22 @@ func (m *Migrator) getTablesToMigrate() ([]string, error) {
 	return m.schemaReader.GetTables()
 }
 
+// schemaResult 表结构创建结果
+type schemaResult struct {
+	tableName string
+	table     *types.Table
+	err       error
+	errMsg    string
+	errSQL    string
+	elapsed   time.Duration
+}
+
 // migrateTables 迁移表（四阶段：先创建所有表结构，再迁移所有数据，然后创建索引和外键，最后设置自增列）
 func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 	result := &types.MigrationResult{}
 
-	// 存储所有表的结构信息，供后续使用
-	tableSchemas := make(map[string]*types.Table)
+	// 存储所有表的结构信息，供后续使用（线程安全）
+	var tableSchemas sync.Map
 
 	// 预先获取所有表的自增列信息（包含起始值）
 	autoIncrInfoMap, err := m.schemaReader.GetAutoIncrementInfo()
@@ -176,120 +192,15 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		autoIncrInfoMap = make(map[string]mysql.AutoIncrementInfo)
 	}
 
-	// ========== 第一阶段：创建所有表结构 ==========
-	log.Printf("========== 第一阶段：创建所有表结构 ==========")
-	for i, tableName := range tables {
-		log.Printf("[%d/%d] 处理表: %s", i+1, len(tables), tableName)
+	// ========== 第一阶段：并行创建所有表结构 ==========
+	log.Printf("========== 第一阶段：并行创建所有表结构（并发数: %d）==========", m.cfg.Migration.Parallelism)
 
-		// 1. 读取表结构
-		table, err := m.schemaReader.GetTableSchema(tableName)
-		if err != nil {
-			result.TablesFailed++
-			result.FailedTables = append(result.FailedTables, tableName)
-			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("读取表结构失败: %v", err))
-			continue
-		}
-
-		// 保存表结构供后续使用
-		tableSchemas[tableName] = table
-
-		// 记录自增列信息（稍后在第四阶段处理）
-		for _, col := range table.Columns {
-			if col.IsAutoIncr {
-				// 获取自增起始值
-				startValue := int64(1) // 默认从1开始
-				if info, ok := autoIncrInfoMap[tableName]; ok {
-					startValue = info.AutoIncrement
-				}
-				m.autoIncrColumns = append(m.autoIncrColumns, autoIncrInfo{
-					tableName:     tableName,
-					columnName:    col.Name,
-					autoIncrement: startValue,
-				})
-			}
-		}
-
-		// 2. 处理已存在的表
-		if m.cfg.Migration.Overwrite {
-			// 配置了 overwrite，直接删除表（IF EXISTS 会自动处理不存在的情况）
-			if err := m.oscarClient.DropTable(tableName); err != nil {
-				result.TablesFailed++
-				result.FailedTables = append(result.FailedTables, tableName)
-				m.failedTableCreate[tableName] = true
-				dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName)
-				m.logger.LogTableCreateFailed(tableName, dropSQL, fmt.Sprintf("删除表失败: %v", err))
-				continue
-			}
-		} else {
-			// 未配置 overwrite，检查表是否存在
-			exists, err := m.oscarClient.TableExists(tableName)
-			if err != nil {
-				result.TablesFailed++
-				result.FailedTables = append(result.FailedTables, tableName)
-				m.failedTableCreate[tableName] = true
-				m.logger.LogTableCreateFailed(tableName, "", fmt.Sprintf("检查表是否存在失败: %v", err))
-				continue
-			}
-			if exists {
-				result.TablesFailed++
-				result.FailedTables = append(result.FailedTables, tableName)
-				m.failedTableCreate[tableName] = true
-				m.logger.LogTableCreateFailed(tableName, "", "表已存在")
-				continue
-			}
-		}
-
-		// 3. 创建表结构（不包含自增属性，稍后单独处理）
-		sql, err := m.schemaWriter.CreateTableWithoutAutoIncr(table)
-		if err != nil {
-			result.TablesFailed++
-			result.FailedTables = append(result.FailedTables, tableName)
-			m.failedTableCreate[tableName] = true
-			m.logger.LogTableCreateFailed(tableName, sql, fmt.Sprintf("%v", err))
-			continue
-		}
-
-		// 4. 添加表注释
-		if table.Comment != "" {
-			_, err := m.schemaWriter.AddTableComment(tableName, table.Comment)
-			if err != nil {
-				log.Printf("[警告] 表 %s: 添加表注释失败: %v", tableName, err)
-			}
-		}
-
-		// 5. 添加列注释
-		failedColComments := m.schemaWriter.AddColumnComments(tableName, table.Columns)
-		if len(failedColComments) > 0 {
-			log.Printf("[警告] 表 %s: %d 个列注释添加失败", tableName, len(failedColComments))
-		}
-
-		log.Printf("[完成] 表 %s: 表结构创建成功", tableName)
-	}
-
-	// ========== 第二阶段：迁移所有表数据（并行） ==========
-	log.Printf("========== 第二阶段：迁移所有表数据 ==========")
-
-	// 过滤出成功创建的表（排除失败的表）
-	successTables := make([]string, 0)
-	for _, tableName := range tables {
-		if !m.failedTableCreate[tableName] {
-			successTables = append(successTables, tableName)
-		}
-	}
-
-	// 使用 worker pool 并行迁移数据
-	type dataResult struct {
-		tableName string
-		rowCount  int64
-		err       error
-		elapsed   time.Duration
-	}
-
-	jobs := make(chan string, len(successTables))
-	results := make(chan *dataResult, len(successTables))
+	// 使用 worker pool 并行创建表结构
+	jobs := make(chan string, len(tables))
+	results := make(chan *schemaResult, len(tables))
 
 	var wg sync.WaitGroup
+	var completedCount int64 // 原子计数器
 
 	// 启动 worker
 	for i := 0; i < m.cfg.Migration.Parallelism; i++ {
@@ -298,20 +209,24 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			defer wg.Done()
 			for tableName := range jobs {
 				startTime := time.Now()
-				table := tableSchemas[tableName]
-				rowCount, err := m.migrateTableData(tableName, table.Columns)
-				results <- &dataResult{
-					tableName: tableName,
-					rowCount:  rowCount,
-					err:       err,
-					elapsed:   time.Since(startTime),
+				r := m.createTableSchema(tableName, autoIncrInfoMap)
+				r.elapsed = time.Since(startTime)
+
+				// 更新进度计数
+				current := atomic.AddInt64(&completedCount, 1)
+				if r.err != nil {
+					log.Printf("[%d/%d] 表 %s: 失败 - %s (%v)", current, len(tables), tableName, r.errMsg, r.elapsed)
+				} else {
+					log.Printf("[%d/%d] 表 %s: 成功 (%v)", current, len(tables), tableName, r.elapsed)
 				}
+
+				results <- r
 			}
 		}()
 	}
 
 	// 发送任务
-	for _, tableName := range successTables {
+	for _, tableName := range tables {
 		jobs <- tableName
 	}
 	close(jobs)
@@ -327,6 +242,75 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		if r.err != nil {
 			result.TablesFailed++
 			result.FailedTables = append(result.FailedTables, r.tableName)
+			m.failedTableCreate.Store(r.tableName, true)
+			m.logger.LogTableCreateFailed(r.tableName, r.errSQL, r.errMsg)
+		} else {
+			// 保存表结构供后续使用
+			tableSchemas.Store(r.tableName, r.table)
+		}
+	}
+
+	// ========== 第二阶段：迁移所有表数据（并行） ==========
+	log.Printf("========== 第二阶段：迁移所有表数据 ==========")
+
+	// 过滤出成功创建的表（排除失败的表）
+	successTables := make([]string, 0)
+	for _, tableName := range tables {
+		if _, failed := m.failedTableCreate.Load(tableName); !failed {
+			successTables = append(successTables, tableName)
+		}
+	}
+
+	// 使用 worker pool 并行迁移数据
+	type dataResult struct {
+		tableName string
+		rowCount  int64
+		err       error
+		elapsed   time.Duration
+	}
+
+	dataJobs := make(chan string, len(successTables))
+	dataResults := make(chan *dataResult, len(successTables))
+
+	var dataWg sync.WaitGroup
+
+	// 启动 worker
+	for i := 0; i < m.cfg.Migration.Parallelism; i++ {
+		dataWg.Add(1)
+		go func() {
+			defer dataWg.Done()
+			for tableName := range dataJobs {
+				startTime := time.Now()
+				if table, ok := tableSchemas.Load(tableName); ok {
+					rowCount, err := m.migrateTableData(tableName, table.(*types.Table).Columns)
+					dataResults <- &dataResult{
+						tableName: tableName,
+						rowCount:  rowCount,
+						err:       err,
+						elapsed:   time.Since(startTime),
+					}
+				}
+			}
+		}()
+	}
+
+	// 发送任务
+	for _, tableName := range successTables {
+		dataJobs <- tableName
+	}
+	close(dataJobs)
+
+	// 等待完成
+	go func() {
+		dataWg.Wait()
+		close(dataResults)
+	}()
+
+	// 收集结果
+	for r := range dataResults {
+		if r.err != nil {
+			result.TablesFailed++
+			result.FailedTables = append(result.FailedTables, r.tableName)
 			m.logger.LogTableDataError(r.tableName, "", r.err.Error())
 		} else {
 			result.TablesMigrated++
@@ -338,24 +322,27 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 	// ========== 第三阶段：创建所有索引和外键 ==========
 	log.Printf("========== 第三阶段：创建索引和外键 ==========")
 
+	failedDataTables := make(map[string]bool)
+	for _, failed := range result.FailedTables {
+		failedDataTables[failed] = true
+	}
+
 	for i, tableName := range successTables {
 		// 跳过数据迁移失败的表
-		skip := false
-		for _, failed := range result.FailedTables {
-			if failed == tableName {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if failedDataTables[tableName] {
 			continue
 		}
 
-		table := tableSchemas[tableName]
+		table, ok := tableSchemas.Load(tableName)
+		if !ok {
+			continue
+		}
+		t := table.(*types.Table)
+
 		log.Printf("[%d/%d] 创建索引和外键: %s", i+1, len(successTables), tableName)
 
-		// 添加主键（在数据迁移完成后）
-		for _, idx := range table.Indexes {
+		// 添加主键（在数据迁移完成后
+		for _, idx := range t.Indexes {
 			if idx.IsPrimary {
 				sql, err := m.schemaWriter.AddPrimaryKey(tableName, idx.Columns)
 				if err != nil {
@@ -368,27 +355,27 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		}
 
 		// 创建索引
-		if m.cfg.Migration.MigrateIndexes && len(table.Indexes) > 0 {
-			failedIndexes := m.schemaWriter.CreateIndexes(tableName, table.Indexes)
+		if m.cfg.Migration.MigrateIndexes && len(t.Indexes) > 0 {
+			failedIndexes := m.schemaWriter.CreateIndexes(tableName, t.Indexes)
 			for _, fi := range failedIndexes {
 				m.logger.LogIndexCreateFailed(tableName, fi.IndexName, fi.SQL, fi.Err.Error())
 			}
 			if len(failedIndexes) == 0 {
-				log.Printf("[完成] 表 %s: 创建了 %d 个索引", tableName, len(table.Indexes))
+				log.Printf("[完成] 表 %s: 创建了 %d 个索引", tableName, len(t.Indexes))
 			} else {
-				log.Printf("[部分完成] 表 %s: 成功 %d 个索引, 失败 %d 个索引", tableName, len(table.Indexes)-len(failedIndexes), len(failedIndexes))
+				log.Printf("[部分完成] 表 %s: 成功 %d 个索引, 失败 %d 个索引", tableName, len(t.Indexes)-len(failedIndexes), len(failedIndexes))
 			}
 		}
 
 		// 创建外键
-		if len(table.ForeignKeys) > 0 {
-			for _, fk := range table.ForeignKeys {
+		if len(t.ForeignKeys) > 0 {
+			for _, fk := range t.ForeignKeys {
 				sql, err := m.schemaWriter.CreateSingleForeignKey(tableName, fk)
 				if err != nil {
 					m.logger.LogFkCreateFailed(tableName, fk.Name, sql, err.Error())
 				}
 			}
-			log.Printf("[完成] 表 %s: 处理了 %d 个外键", tableName, len(table.ForeignKeys))
+			log.Printf("[完成] 表 %s: 处理了 %d 个外键", tableName, len(t.ForeignKeys))
 		}
 	}
 
@@ -397,7 +384,7 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 
 	for _, ai := range m.autoIncrColumns {
 		// 跳过失败的表
-		if m.failedTableCreate[ai.tableName] {
+		if _, failed := m.failedTableCreate.Load(ai.tableName); failed {
 			continue
 		}
 
@@ -426,6 +413,87 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 	}
 
 	return result
+}
+
+// createTableSchema 创建单个表结构（供 worker 调用）
+func (m *Migrator) createTableSchema(tableName string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo) *schemaResult {
+	r := &schemaResult{tableName: tableName}
+
+	// 1. 读取表结构
+	table, err := m.schemaReader.GetTableSchema(tableName)
+	if err != nil {
+		r.err = err
+		r.errMsg = fmt.Sprintf("读取表结构失败: %v", err)
+		return r
+	}
+	r.table = table
+
+	// 记录自增列信息（稍后在第四阶段处理）
+	for _, col := range table.Columns {
+		if col.IsAutoIncr {
+			// 获取自增起始值
+			startValue := int64(1) // 默认从1开始
+			if info, ok := autoIncrInfoMap[tableName]; ok {
+				startValue = info.AutoIncrement
+			}
+			m.autoIncrMutex.Lock()
+			m.autoIncrColumns = append(m.autoIncrColumns, autoIncrInfo{
+				tableName:     tableName,
+				columnName:    col.Name,
+				autoIncrement: startValue,
+			})
+			m.autoIncrMutex.Unlock()
+		}
+	}
+
+	// 2. 处理已存在的表
+	if m.cfg.Migration.Overwrite {
+		// 配置了 overwrite，直接删除表（IF EXISTS 会自动处理不存在的情况）
+		if err := m.oscarClient.DropTable(tableName); err != nil {
+			r.err = err
+			r.errMsg = fmt.Sprintf("删除表失败: %v", err)
+			r.errSQL = fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName)
+			return r
+		}
+	} else {
+		// 未配置 overwrite，检查表是否存在
+		exists, err := m.oscarClient.TableExists(tableName)
+		if err != nil {
+			r.err = err
+			r.errMsg = fmt.Sprintf("检查表是否存在失败: %v", err)
+			return r
+		}
+		if exists {
+			r.err = fmt.Errorf("表已存在")
+			r.errMsg = "表已存在"
+			return r
+		}
+	}
+
+	// 3. 创建表结构（不包含自增属性，稍后单独处理）
+	sql, err := m.schemaWriter.CreateTableWithoutAutoIncr(table)
+	if err != nil {
+		r.err = err
+		r.errMsg = fmt.Sprintf("%v", err)
+		r.errSQL = sql
+		return r
+	}
+
+	// 4. 添加表注释
+	if table.Comment != "" {
+		_, err := m.schemaWriter.AddTableComment(tableName, table.Comment)
+		if err != nil {
+			log.Printf("[警告] 表 %s: 添加表注释失败: %v", tableName, err)
+		}
+	}
+
+	// 5. 添加列注释
+	failedColComments := m.schemaWriter.AddColumnComments(tableName, table.Columns)
+	if len(failedColComments) > 0 {
+		log.Printf("[警告] 表 %s: %d 个列注释添加失败", tableName, len(failedColComments))
+	}
+
+	return r
 }
 
 // migrateTableData 迁移表数据，返回迁移的行数

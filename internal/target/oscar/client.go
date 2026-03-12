@@ -16,7 +16,8 @@ type Client struct {
 }
 
 // NewClient 创建 Oscar 客户端
-func NewClient(host, username, password, database string, port int) (*Client, error) {
+// maxConns: 最大连接数，应设置为 parallelism + 缓冲
+func NewClient(host, username, password, database string, port int, maxConns int) (*Client, error) {
 	// 构建连接字符串
 	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
 
@@ -30,9 +31,9 @@ func NewClient(host, username, password, database string, port int) (*Client, er
 		return nil, fmt.Errorf("Oscar 连接测试失败: %w", err)
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	// 设置连接池参数（根据 parallelism 动态调整）
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns / 2)
 	db.SetConnMaxLifetime(30 * time.Minute) // 连接最大生命周期
 	db.SetConnMaxIdleTime(5 * time.Minute)  // 空闲连接最大存活时间
 
