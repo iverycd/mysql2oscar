@@ -31,7 +31,8 @@ func NewClient(host string, port int, user, password, database, charset string, 
 
 	// 设置连接池参数（根据 parallelism 动态调整）
 	db.SetMaxOpenConns(maxConns)
-	db.SetMaxIdleConns(maxConns / 2)
+	db.SetMaxIdleConns(maxConns) // 与 MaxOpenConns 相同，避免频繁创建连接
+	db.SetConnMaxLifetime(0)     // 不限制连接生命周期
 
 	return &Client{
 		db:     db,

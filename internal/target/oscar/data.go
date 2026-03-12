@@ -3,6 +3,7 @@ package oscar
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"mysql2oscar/pkg/types"
 )
@@ -137,4 +138,33 @@ func (w *DataWriter) GetRowCount(tableName string) (int64, error) {
 // quoteIdentifier 引用标识符（转为小写）
 func (w *DataWriter) quoteIdentifier(name string) string {
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
+}
+
+// InsertBatchWithRetry 带重试的批量插入
+// 用于处理 Oscar ODBC 驱动在高并发时的连接不稳定问题
+func (w *DataWriter) InsertBatchWithRetry(tableName string, batch *types.DataBatch, maxRetries int) (int64, error) {
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		inserted, err := w.InsertBatchOptimized(tableName, batch)
+		if err == nil {
+			return inserted, nil
+		}
+		lastErr = err
+		// 检查是否是连接错误，需要重试
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "bad connection") ||
+			strings.Contains(errMsg, "driver") ||
+			strings.Contains(errMsg, "connection") {
+			// 指数退避
+			sleepTime := time.Duration(i+1) * time.Second
+			if sleepTime > 5*time.Second {
+				sleepTime = 5 * time.Second
+			}
+			time.Sleep(sleepTime)
+			continue
+		}
+		// 其他错误直接返回
+		return 0, err
+	}
+	return 0, lastErr
 }

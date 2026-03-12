@@ -33,3 +33,13 @@ migration:
   batch_size: 1000
   # 是否覆盖已存在的表
   overwrite: false
+  # 大表优化配置
+  large_table_optimization:
+    # 是否启用大表优化
+    enabled: true
+    # 大表阈值（行数），超过此值启用分片并行
+    row_threshold: 100000
+    # 每个大表的并行分片数
+    shard_parallelism: 4
+    # 分片大小（每片的行数）
+    shard_size: 50000

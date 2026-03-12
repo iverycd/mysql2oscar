@@ -2,6 +2,30 @@ package types
 
 import "time"
 
+// PrimaryKeyType 主键类型枚举
+type PrimaryKeyType int
+
+const (
+	// PKTypeNone 无主键
+	PKTypeNone PrimaryKeyType = iota
+	// PKTypeInteger 整数主键（支持范围分片）
+	PKTypeInteger
+	// PKTypeOther 其他类型主键（UUID/复合主键等）
+	PKTypeOther
+)
+
+// ShardRange 数据分片范围
+type ShardRange struct {
+	// 范围分片（整数主键）
+	StartValue interface{} // 分片起始值
+	EndValue   interface{} // 分片结束值（不包含）
+	// OFFSET 分片（其他类型主键）
+	Offset int64 // 偏移量
+	Limit  int64 // 分片大小
+	// 通用
+	ShardIndex int // 分片索引
+}
+
 // Column 表示数据库列的定义
 type Column struct {
 	Name         string
@@ -12,38 +36,38 @@ type Column struct {
 	IsAutoIncr   bool
 	Comment      string
 	// MySQL 特有属性
-	CharMaxLength   int
+	CharMaxLength    int
 	NumericPrecision int
-	NumericScale    int
-	EnumValues      []string
+	NumericScale     int
+	EnumValues       []string
 }
 
 // Index 表示索引定义
 type Index struct {
-	Name    string
-	Columns []string
-	IsUnique bool
+	Name      string
+	Columns   []string
+	IsUnique  bool
 	IsPrimary bool
 }
 
 // ForeignKey 表示外键约束
 type ForeignKey struct {
-	Name             string
-	Columns          []string
-	ReferencedTable  string
+	Name              string
+	Columns           []string
+	ReferencedTable   string
 	ReferencedColumns []string
-	OnDelete         string
-	OnUpdate         string
+	OnDelete          string
+	OnUpdate          string
 }
 
 // Table 表示表结构定义
 type Table struct {
-	Schema     string
-	Name       string
-	Columns    []Column
-	Indexes    []Index
+	Schema      string
+	Name        string
+	Columns     []Column
+	Indexes     []Index
 	ForeignKeys []ForeignKey
-	Comment    string
+	Comment     string
 }
 
 // View 表示视图定义
@@ -77,12 +101,12 @@ type MigrationProgress struct {
 
 // MigrationResult 表示迁移结果
 type MigrationResult struct {
-	TablesMigrated  int
-	TablesFailed    int
-	ViewsMigrated   int
-	ViewsFailed     int
-	TotalRows       int64
-	TotalTime       time.Duration
-	FailedTables    []string
-	FailedViews     []string
+	TablesMigrated int
+	TablesFailed   int
+	ViewsMigrated  int
+	ViewsFailed    int
+	TotalRows      int64
+	TotalTime      time.Duration
+	FailedTables   []string
+	FailedViews    []string
 }

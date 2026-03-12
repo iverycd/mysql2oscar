@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -253,4 +254,259 @@ func (r *DataReader) ReadWithOffset(tableName string, offset, limit int64) (*typ
 	}
 
 	return batch, rows.Err()
+}
+
+// PrimaryKeyInfo 主键信息
+type PrimaryKeyInfo struct {
+	Name      string               // 主键列名
+	Type      types.PrimaryKeyType // 主键类型
+	MinValue  interface{}          // 最小值（仅整数主键有效）
+	MaxValue  interface{}          // 最大值（仅整数主键有效）
+	IsNumeric bool                 // 是否是数值类型
+}
+
+// GetPrimaryKeyInfo 获取表的主键信息
+func (r *DataReader) GetPrimaryKeyInfo(tableName string) (*PrimaryKeyInfo, error) {
+	// 查询主键列名和类型
+	query := `
+		SELECT k.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE
+		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+		JOIN INFORMATION_SCHEMA.COLUMNS c
+			ON k.TABLE_SCHEMA = c.TABLE_SCHEMA
+			AND k.TABLE_NAME = c.TABLE_NAME
+			AND k.COLUMN_NAME = c.COLUMN_NAME
+		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ?
+			AND k.CONSTRAINT_NAME = 'PRIMARY'
+		ORDER BY k.ORDINAL_POSITION
+		LIMIT 1
+	`
+
+	var pkName, dataType, columnType string
+	err := r.client.db.QueryRow(query, r.client.dbName, tableName).Scan(&pkName, &dataType, &columnType)
+	if err != nil {
+		// 无主键
+		return &PrimaryKeyInfo{Type: types.PKTypeNone}, nil
+	}
+
+	// 判断是否是整数类型
+	isInteger := isIntegerType(dataType)
+
+	if !isInteger {
+		// UUID 或其他类型
+		return &PrimaryKeyInfo{
+			Name: pkName,
+			Type: types.PKTypeOther,
+		}, nil
+	}
+
+	// 整数主键，获取最小值和最大值
+	minMaxQuery := fmt.Sprintf("SELECT MIN(`%s`), MAX(`%s`) FROM `%s`", pkName, pkName, tableName)
+	var minValue, maxValue interface{}
+	err = r.client.db.QueryRow(minMaxQuery).Scan(&minValue, &maxValue)
+	if err != nil {
+		return nil, fmt.Errorf("获取主键范围失败: %w", err)
+	}
+
+	return &PrimaryKeyInfo{
+		Name:      pkName,
+		Type:      types.PKTypeInteger,
+		MinValue:  minValue,
+		MaxValue:  maxValue,
+		IsNumeric: true,
+	}, nil
+}
+
+// isIntegerType 判断是否是整数类型
+func isIntegerType(dataType string) bool {
+	switch strings.ToUpper(dataType) {
+	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT":
+		return true
+	default:
+		return false
+	}
+}
+
+// ReadTableDataByRange 按主键范围读取数据（用于整数主键分片）
+func (r *DataReader) ReadTableDataByRange(
+	tableName string,
+	columns []string,
+	pkName string,
+	startValue, endValue interface{},
+	callback func(batch *types.DataBatch) error,
+) error {
+	// 构建列列表
+	columnList := "*"
+	if len(columns) > 0 {
+		columnList = ""
+		for i, col := range columns {
+			if i > 0 {
+				columnList += ", "
+			}
+			columnList += fmt.Sprintf("`%s`", col)
+		}
+	}
+
+	// 构建范围查询
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if endValue == nil {
+		// 最后一个分片，无上界
+		query = fmt.Sprintf("SELECT %s FROM `%s` WHERE `%s` >= ?", columnList, tableName, pkName)
+		rows, err = r.client.db.Query(query, startValue)
+	} else {
+		query = fmt.Sprintf("SELECT %s FROM `%s` WHERE `%s` >= ? AND `%s` < ?", columnList, tableName, pkName, pkName)
+		rows, err = r.client.db.Query(query, startValue, endValue)
+	}
+	if err != nil {
+		return fmt.Errorf("查询数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	// 获取列信息
+	colInfos, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("获取列类型失败: %w", err)
+	}
+
+	// 记录哪些列是二进制类型
+	isBinary := make([]bool, len(colInfos))
+	colNames := make([]string, len(colInfos))
+	for i, col := range colInfos {
+		colNames[i] = col.Name()
+		isBinary[i] = isBinaryType(col.DatabaseTypeName())
+	}
+
+	batch := &types.DataBatch{
+		Columns: colNames,
+		Rows:    make([]types.DataRow, 0, r.batchSize),
+	}
+
+	for rows.Next() {
+		values := make([]interface{}, len(colInfos))
+		valuePtrs := make([]interface{}, len(colInfos))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return fmt.Errorf("扫描数据行失败: %w", err)
+		}
+
+		// 根据列类型决定是否转换 []byte 为 string
+		for i := range values {
+			if b, ok := values[i].([]byte); ok {
+				if !isBinary[i] {
+					values[i] = string(b)
+				}
+			}
+		}
+
+		batch.Rows = append(batch.Rows, types.DataRow{Values: values})
+
+		// 达到批处理大小，回调处理
+		if len(batch.Rows) >= r.batchSize {
+			if err := callback(batch); err != nil {
+				return err
+			}
+			batch.Rows = make([]types.DataRow, 0, r.batchSize)
+		}
+	}
+
+	// 处理剩余数据
+	if len(batch.Rows) > 0 {
+		if err := callback(batch); err != nil {
+			return err
+		}
+	}
+
+	return rows.Err()
+}
+
+// ReadTableDataByOffset 按偏移量读取数据（用于非整数主键分片）
+func (r *DataReader) ReadTableDataByOffset(
+	tableName string,
+	offset, limit int64,
+	callback func(batch *types.DataBatch) error,
+) error {
+	batch, err := r.ReadWithOffset(tableName, offset, limit)
+	if err != nil {
+		return err
+	}
+
+	if len(batch.Rows) > 0 {
+		return callback(batch)
+	}
+	return nil
+}
+
+// CalculateShards 计算分片范围
+func (r *DataReader) CalculateShards(
+	totalRows int64,
+	pkInfo *PrimaryKeyInfo,
+	shardSize int64,
+) []types.ShardRange {
+	var shards []types.ShardRange
+
+	if pkInfo.Type == types.PKTypeInteger && pkInfo.MinValue != nil && pkInfo.MaxValue != nil {
+		// 整数主键：按值范围分片
+		minVal := toInt64(pkInfo.MinValue)
+		maxVal := toInt64(pkInfo.MaxValue)
+
+		shardIndex := 0
+		for start := minVal; start <= maxVal; start += shardSize {
+			end := start + shardSize
+			if end > maxVal {
+				end = maxVal + 1 // 确保包含最大值
+			}
+			shards = append(shards, types.ShardRange{
+				StartValue: start,
+				EndValue:   end,
+				ShardIndex: shardIndex,
+			})
+			shardIndex++
+		}
+	} else {
+		// 非整数主键：按行数 OFFSET 分片
+		shardIndex := 0
+		for offset := int64(0); offset < totalRows; offset += shardSize {
+			limit := shardSize
+			if offset+limit > totalRows {
+				limit = totalRows - offset
+			}
+			shards = append(shards, types.ShardRange{
+				Offset:     offset,
+				Limit:      limit,
+				ShardIndex: shardIndex,
+			})
+			shardIndex++
+		}
+	}
+
+	return shards
+}
+
+// toInt64 将 interface{} 转换为 int64
+func toInt64(v interface{}) int64 {
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int32:
+		return int64(val)
+	case int:
+		return int64(val)
+	case uint64:
+		return int64(val)
+	case uint32:
+		return int64(val)
+	case uint:
+		return int64(val)
+	case float64:
+		return int64(val)
+	case float32:
+		return int64(val)
+	default:
+		return 0
+	}
 }
