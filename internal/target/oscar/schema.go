@@ -93,32 +93,49 @@ func (w *SchemaWriter) AddPrimaryKey(tableName string, columns []string) (string
 	return sql, nil
 }
 
-// CreateAutoIncrUniqueIndex 为自增列创建唯一索引
+// DropSequence 删除序列
 // 返回生成的 SQL 语句和可能的错误
-func (w *SchemaWriter) CreateAutoIncrUniqueIndex(tableName, columnName string) (string, error) {
-	indexName := fmt.Sprintf("UK_%s_%s", tableName, columnName)
-	sql := fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s (%s)",
-		w.quoteIdentifier(indexName),
-		w.quoteIdentifier(tableName),
-		w.quoteIdentifier(columnName))
+func (w *SchemaWriter) DropSequence(tableName, columnName string) (string, error) {
+	// 序列名称格式：seq_表名_列名（全小写）
+	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	sql := fmt.Sprintf("DROP SEQUENCE IF EXISTS %s", w.quoteIdentifier(seqName))
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return sql, fmt.Errorf("创建自增列唯一索引失败: %w", err)
+		return sql, fmt.Errorf("删除序列失败: %w", err)
 	}
 
 	return sql, nil
 }
 
-// SetColumnAutoIncrement 设置列为自增列
+// CreateSequence 创建序列
+// startValue: 序列起始值（从MySQL的Auto_increment获取）
 // 返回生成的 SQL 语句和可能的错误
-func (w *SchemaWriter) SetColumnAutoIncrement(tableName, columnName string) (string, error) {
-	// 神通数据库语法：ALTER TABLE 表名 ALTER TYPE 列名 INT AUTO_INCREMENT
-	sql := fmt.Sprintf("ALTER TABLE %s ALTER TYPE %s INT AUTO_INCREMENT",
-		w.quoteIdentifier(tableName),
-		w.quoteIdentifier(columnName))
+func (w *SchemaWriter) CreateSequence(tableName, columnName string, startValue int64) (string, error) {
+	// 序列名称格式：seq_表名_列名（全小写）
+	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	sql := fmt.Sprintf("CREATE SEQUENCE %s INCREMENT BY 1 START %d",
+		w.quoteIdentifier(seqName), startValue)
 
 	if _, err := w.client.Exec(sql); err != nil {
-		return sql, fmt.Errorf("设置自增属性失败: %w", err)
+		return sql, fmt.Errorf("创建序列失败: %w", err)
+	}
+
+	return sql, nil
+}
+
+// SetColumnDefaultSequence 设置列的默认值为序列的下一个值
+// 返回生成的 SQL 语句和可能的错误
+func (w *SchemaWriter) SetColumnDefaultSequence(tableName, columnName string) (string, error) {
+	// 序列名称格式：seq_表名_列名（全小写）
+	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	// 神通数据库语法：ALTER TABLE 表名 ALTER COLUMN 列名 SET DEFAULT nextval('序列名')
+	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT nextval('%s')",
+		w.quoteIdentifier(tableName),
+		w.quoteIdentifier(columnName),
+		strings.ToLower(seqName))
+
+	if _, err := w.client.Exec(sql); err != nil {
+		return sql, fmt.Errorf("设置列默认值为序列失败: %w", err)
 	}
 
 	return sql, nil

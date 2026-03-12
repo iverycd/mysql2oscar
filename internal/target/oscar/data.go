@@ -29,7 +29,7 @@ func (w *DataWriter) InsertBatch(tableName string, batch *types.DataBatch) (int6
 		quotedCols[i] = w.quoteIdentifier(col)
 	}
 
-	// 构建占位符 (Oscar 使用 $1, $2, $3 ���式)
+	// 构建占位符 (Oscar 使用 $1, $2, $3 )
 	placeholders := make([]string, len(batch.Columns))
 	for i := range placeholders {
 		placeholders[i] = fmt.Sprintf(":%d", i+1)

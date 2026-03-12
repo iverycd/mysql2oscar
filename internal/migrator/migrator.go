@@ -33,8 +33,9 @@ type Migrator struct {
 
 // autoIncrInfo 自增列信息
 type autoIncrInfo struct {
-	tableName  string
-	columnName string
+	tableName     string
+	columnName    string
+	autoIncrement int64 // 自增起始值
 }
 
 // New 创建迁移器
@@ -168,6 +169,13 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 	// 存储所有表的结构信息，供后续使用
 	tableSchemas := make(map[string]*types.Table)
 
+	// 预先获取所有表的自增列信息（包含起始值）
+	autoIncrInfoMap, err := m.schemaReader.GetAutoIncrementInfo()
+	if err != nil {
+		log.Printf("[注意] 获取自增列信息失败: %v，将使用默认起始值1", err)
+		autoIncrInfoMap = make(map[string]mysql.AutoIncrementInfo)
+	}
+
 	// ========== 第一阶段：创建所有表结构 ==========
 	log.Printf("========== 第一阶段：创建所有表结构 ==========")
 	for i, tableName := range tables {
@@ -189,9 +197,15 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		// 记录自增列信息（稍后在第四阶段处理）
 		for _, col := range table.Columns {
 			if col.IsAutoIncr {
+				// 获取自增起始值
+				startValue := int64(1) // 默认从1开始
+				if info, ok := autoIncrInfoMap[tableName]; ok {
+					startValue = info.AutoIncrement
+				}
 				m.autoIncrColumns = append(m.autoIncrColumns, autoIncrInfo{
-					tableName:  tableName,
-					columnName: col.Name,
+					tableName:     tableName,
+					columnName:    col.Name,
+					autoIncrement: startValue,
 				})
 			}
 		}
@@ -378,8 +392,8 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 		}
 	}
 
-	// ========== 第四阶段：设置自增列 ==========
-	log.Printf("========== 第四阶段：设置自增列 ==========")
+	// ========== 第四阶段：设置自增列（使用序列方式） ==========
+	log.Printf("========== 第四阶段：设置自增列（使用序列方式） ==========")
 
 	for _, ai := range m.autoIncrColumns {
 		// 跳过失败的表
@@ -387,19 +401,24 @@ func (m *Migrator) migrateTables(tables []string) *types.MigrationResult {
 			continue
 		}
 
-		log.Printf("[处理] 表 %s 自增列 %s", ai.tableName, ai.columnName)
+		log.Printf("[处理] 表 %s 自增列 %s (起始值: %d)", ai.tableName, ai.columnName, ai.autoIncrement)
 
-		// 1. 先为自增列创建唯一索引
-		sql, err := m.schemaWriter.CreateAutoIncrUniqueIndex(ai.tableName, ai.columnName)
+		// 1. 先删除可能存在的序列
+		sql, _ := m.schemaWriter.DropSequence(ai.tableName, ai.columnName)
+		// 忽略删除序列的错误，因为序列可能不存在
+
+		// 2. 创建序列
+		sql, err := m.schemaWriter.CreateSequence(ai.tableName, ai.columnName, ai.autoIncrement)
 		if err != nil {
-			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("创建唯一索引失败: %v", err))
+			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("创建序列失败: %v", err))
 			continue
 		}
+		log.Printf("[进度] 表 %s: 创建序列成功", ai.tableName)
 
-		// 2. 修改列为自增列
-		sql, err = m.schemaWriter.SetColumnAutoIncrement(ai.tableName, ai.columnName)
+		// 3. 设置列的默认值为序列的下一个值
+		sql, err = m.schemaWriter.SetColumnDefaultSequence(ai.tableName, ai.columnName)
 		if err != nil {
-			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("设置自增属性失败: %v", err))
+			m.logger.LogAutoIncrFailed(ai.tableName, ai.columnName, sql, fmt.Sprintf("设置列默认值为序列失败: %v", err))
 			continue
 		}
 

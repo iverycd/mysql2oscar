@@ -353,3 +353,62 @@ func (r *SchemaReader) GetViewDefinition(viewName string) (*types.View, error) {
 		Definition: definition,
 	}, nil
 }
+
+// AutoIncrementInfo 自增列信息（包含起始值）
+type AutoIncrementInfo struct {
+	TableName     string
+	ColumnName    string
+	AutoIncrement int64
+}
+
+// GetAutoIncrementInfo 批量获取所有表的自增列信息
+// 返回：表名 -> 自增列信息列表
+func (r *SchemaReader) GetAutoIncrementInfo() (map[string]AutoIncrementInfo, error) {
+	// 查询MySQL自增列信息，包括Auto_increment起始值
+	query := `
+		SELECT
+			a.TABLE_NAME,
+			b.COLUMN_NAME,
+			a.Auto_increment
+		FROM (
+			SELECT TABLE_NAME, Auto_increment
+			FROM INFORMATION_SCHEMA.TABLES
+			WHERE TABLE_SCHEMA = ? AND AUTO_INCREMENT IS NOT NULL
+		) a
+		JOIN (
+			SELECT TABLE_NAME, COLUMN_NAME
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = ? AND EXTRA = 'auto_increment'
+		) b ON a.TABLE_NAME = b.TABLE_NAME
+	`
+
+	rows, err := r.client.db.Query(query, r.client.dbName, r.client.dbName)
+	if err != nil {
+		return nil, fmt.Errorf("查询自增列信息失败: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]AutoIncrementInfo)
+	for rows.Next() {
+		var tableName, columnName string
+		var autoIncrement sql.NullInt64
+
+		if err := rows.Scan(&tableName, &columnName, &autoIncrement); err != nil {
+			return nil, fmt.Errorf("扫描自增列信息失败: %w", err)
+		}
+
+		info := AutoIncrementInfo{
+			TableName:  tableName,
+			ColumnName: columnName,
+		}
+		if autoIncrement.Valid {
+			info.AutoIncrement = autoIncrement.Int64
+		} else {
+			info.AutoIncrement = 1 // 默认从1开始
+		}
+
+		result[tableName] = info
+	}
+
+	return result, nil
+}
