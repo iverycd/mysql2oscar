@@ -3,6 +3,8 @@ package oscar
 import (
 	"fmt"
 	"math/rand"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -427,6 +429,16 @@ func (w *SchemaWriter) formatDefault(value string) string {
 	// 判断是否是字符串类型
 	if value == "NULL" {
 		return "NULL"
+	}
+
+	// 处理 MySQL 位字面量 b'0', b'1', B'0', B'1' 等
+	// 位字面量格式: b'xxx' 或 B'xxx'，其中 xxx 是二进制数字
+	if matched, _ := regexp.MatchString(`^[bB]'[01]+'$`, value); matched {
+		// 提取引号内的二进制值并转换为十进制整数
+		bits := strings.Trim(value[2:], "'")
+		if val, err := strconv.ParseInt(bits, 2, 64); err == nil {
+			return strconv.FormatInt(val, 10)
+		}
 	}
 
 	// 如果已经带引号，直接返回
