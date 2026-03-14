@@ -31,6 +31,10 @@ func (m *TypeMapper) SetCustomMapping(mysqlType, oscarType string) {
 func (m *TypeMapper) MapType(mysqlType string) string {
 	upperType := strings.ToUpper(mysqlType)
 
+	// 去除 UNSIGNED 和 SIGNED 关键字（神通数据库不支持）
+	upperType = strings.ReplaceAll(upperType, " UNSIGNED", "")
+	upperType = strings.ReplaceAll(upperType, " SIGNED", "")
+
 	// 检查自定义映射
 	if oscarType, ok := m.customMappings[upperType]; ok {
 		return oscarType

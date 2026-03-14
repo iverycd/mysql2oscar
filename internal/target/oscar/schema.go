@@ -356,6 +356,10 @@ func (w *SchemaWriter) CreateView(view *types.View) (string, error) {
 func (w *SchemaWriter) convertType(mysqlType string) string {
 	upperType := strings.ToUpper(mysqlType)
 
+	// 去除 UNSIGNED 和 SIGNED 关键字（神通数据库不支持）
+	upperType = strings.ReplaceAll(upperType, " UNSIGNED", "")
+	upperType = strings.ReplaceAll(upperType, " SIGNED", "")
+
 	// 处理带括号的类型，如 VARCHAR(255), DECIMAL(10,2)
 	baseType := upperType
 	size := ""
