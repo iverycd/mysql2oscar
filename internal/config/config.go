@@ -46,20 +46,6 @@ type MigrationConfig struct {
 	BatchSize int `yaml:"batch_size"`
 	// 是否覆盖已存在的表
 	Overwrite bool `yaml:"overwrite"`
-	// 大表优化配置
-	LargeTableOptimization LargeTableConfig `yaml:"large_table_optimization"`
-}
-
-// LargeTableConfig 大表优化配置
-type LargeTableConfig struct {
-	// 是否启用大表优化
-	Enabled bool `yaml:"enabled"`
-	// 大表阈值（行数），超过此值启用分片并行
-	RowThreshold int64 `yaml:"row_threshold"`
-	// 每个大表的并行分片数
-	ShardParallelism int `yaml:"shard_parallelism"`
-	// 分片大小（每片的行数）
-	ShardSize int64 `yaml:"shard_size"`
 }
 
 // Load 从文件加载配置
@@ -94,16 +80,4 @@ func setDefaults(cfg *Config) {
 	if cfg.Migration.BatchSize == 0 {
 		cfg.Migration.BatchSize = 1000
 	}
-	// 大表优化默认值
-	if cfg.Migration.LargeTableOptimization.RowThreshold == 0 {
-		cfg.Migration.LargeTableOptimization.RowThreshold = 100000
-	}
-	if cfg.Migration.LargeTableOptimization.ShardParallelism == 0 {
-		cfg.Migration.LargeTableOptimization.ShardParallelism = 4
-	}
-	if cfg.Migration.LargeTableOptimization.ShardSize == 0 {
-		cfg.Migration.LargeTableOptimization.ShardSize = 50000
-	}
-	// 默认启用大表优化
-	cfg.Migration.LargeTableOptimization.Enabled = true
 }

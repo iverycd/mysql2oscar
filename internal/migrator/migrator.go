@@ -48,16 +48,10 @@ func New(cfg *config.Config) (*Migrator, error) {
 		return nil, fmt.Errorf("创建日志管理器失败: %w", err)
 	}
 
-	// 计算连接池大小：考虑分片并行
-	// 当启用大表优化时，最大并发连接需求 = parallelism * shard_parallelism
-	maxConns := cfg.Migration.Parallelism
-	if cfg.Migration.LargeTableOptimization.Enabled {
-		maxConns = cfg.Migration.Parallelism * cfg.Migration.LargeTableOptimization.ShardParallelism
-	}
-	maxConns += 5 // 缓冲
+	// 计算连接池大小
+	maxConns := cfg.Migration.Parallelism + 5 // 缓冲
 
-	log.Printf("[连接池] 最大连接数: %d (parallelism=%d, shard_parallelism=%d)",
-		maxConns, cfg.Migration.Parallelism, cfg.Migration.LargeTableOptimization.ShardParallelism)
+	log.Printf("[连接池] 最大连接数: %d (parallelism=%d)", maxConns, cfg.Migration.Parallelism)
 
 	// 创建 MySQL 客户端
 	mysqlClient, err := mysql.NewClient(
@@ -505,24 +499,8 @@ func (m *Migrator) createTableSchema(tableName string, autoIncrInfoMap map[strin
 }
 
 // migrateTableData 迁移表数据，返回迁移的行数
-// 支持大表分片并行迁移
 func (m *Migrator) migrateTableData(tableName string, columns []types.Column) (int64, error) {
-	cfg := m.cfg.Migration.LargeTableOptimization
-
-	// 获取表行数
-	rowCount, err := m.dataReader.GetRowCount(tableName)
-	if err != nil {
-		return 0, fmt.Errorf("获取表行数失败: %w", err)
-	}
-
-	// 判断是否需要分片并行
-	if !cfg.Enabled || rowCount < cfg.RowThreshold {
-		// 小表或未启用优化：使用原有单线程方式
-		return m.migrateTableDataSimple(tableName, columns)
-	}
-
-	// 大表：使用分片并行方式
-	return m.migrateTableDataSharded(tableName, columns, rowCount)
+	return m.migrateTableDataSimple(tableName, columns)
 }
 
 // migrateTableDataSimple 单线程迁移（原有逻辑）
@@ -553,216 +531,6 @@ func (m *Migrator) migrateTableDataSimple(tableName string, columns []types.Colu
 	})
 
 	return totalRows, err
-}
-
-// migrateTableDataSharded 分片并行迁移大表
-func (m *Migrator) migrateTableDataSharded(tableName string, columns []types.Column, totalRows int64) (int64, error) {
-	cfg := m.cfg.Migration.LargeTableOptimization
-
-	// 获取主键信息
-	pkInfo, err := m.dataReader.GetPrimaryKeyInfo(tableName)
-	if err != nil {
-		log.Printf("[警告] 表 %s: 获取主键信息失败: %v，回退到单线程", tableName, err)
-		return m.migrateTableDataSimple(tableName, columns)
-	}
-
-	// 计算分片
-	shards := m.dataReader.CalculateShards(totalRows, pkInfo, cfg.ShardSize)
-	if len(shards) == 0 {
-		return m.migrateTableDataSimple(tableName, columns)
-	}
-
-	// 根据主键类型选择分片策略
-	if pkInfo.Type == types.PKTypeInteger {
-		log.Printf("[分片-范围] 表 %s (%d 行) 分为 %d 个分片，并行数: %d",
-			tableName, totalRows, len(shards), cfg.ShardParallelism)
-		return m.migrateByRangeShards(tableName, columns, pkInfo, shards)
-	}
-
-	// 其他类型主键或无主键
-	log.Printf("[分片-OFFSET] 表 %s (%d 行) 分为 %d 个分片，并行数: %d（注意：大OFFSET性能可能较慢）",
-		tableName, totalRows, len(shards), cfg.ShardParallelism)
-	return m.migrateByOffsetShards(tableName, shards)
-}
-
-// migrateByRangeShards 范围分片迁移（整数主键）
-func (m *Migrator) migrateByRangeShards(
-	tableName string,
-	columns []types.Column,
-	pkInfo *mysql.PrimaryKeyInfo,
-	shards []types.ShardRange,
-) (int64, error) {
-	cfg := m.cfg.Migration.LargeTableOptimization
-
-	// 获取列名
-	colNames := make([]string, len(columns))
-	for i, col := range columns {
-		colNames[i] = col.Name
-	}
-
-	// 分片结果
-	type shardResult struct {
-		inserted int64
-		err      error
-	}
-
-	var totalInserted int64
-	var insertMutex sync.Mutex
-	var hasError bool
-
-	// 创建分片任务 channel
-	shardChan := make(chan types.ShardRange, len(shards))
-	resultChan := make(chan *shardResult, len(shards))
-
-	// 填充分片任务
-	for _, shard := range shards {
-		shardChan <- shard
-	}
-	close(shardChan)
-
-	// 启动 worker
-	var wg sync.WaitGroup
-	for i := 0; i < cfg.ShardParallelism; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for shard := range shardChan {
-				inserted, err := m.processRangeShard(tableName, colNames, pkInfo.Name, shard)
-				resultChan <- &shardResult{inserted: inserted, err: err}
-			}
-		}()
-	}
-
-	// 等待完成
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// 收集结果
-	for result := range resultChan {
-		if result.err != nil {
-			log.Printf("[错误] 表 %s 分片迁移失败: %v", tableName, result.err)
-			hasError = true
-			m.logger.LogTableDataError(tableName, "range_shard", result.err.Error())
-		}
-		insertMutex.Lock()
-		totalInserted += result.inserted
-		insertMutex.Unlock()
-	}
-
-	if hasError {
-		return totalInserted, fmt.Errorf("部分分片迁移失败")
-	}
-	return totalInserted, nil
-}
-
-// processRangeShard 处理单个范围分片
-func (m *Migrator) processRangeShard(
-	tableName string,
-	colNames []string,
-	pkName string,
-	shard types.ShardRange,
-) (int64, error) {
-	var inserted int64
-	err := m.dataReader.ReadTableDataByRange(
-		tableName,
-		colNames,
-		pkName,
-		shard.StartValue,
-		shard.EndValue,
-		func(batch *types.DataBatch) error {
-			// 使用带重试的批量插入，最多重试3次
-			n, err := m.dataWriter.InsertBatchWithRetry(tableName, batch, 3)
-			if err != nil {
-				return err
-			}
-			inserted += n
-			return nil
-		},
-	)
-	return inserted, err
-}
-
-// migrateByOffsetShards OFFSET 分片迁移（其他类型主键）
-func (m *Migrator) migrateByOffsetShards(tableName string, shards []types.ShardRange) (int64, error) {
-	cfg := m.cfg.Migration.LargeTableOptimization
-
-	// 分片结果
-	type shardResult struct {
-		inserted int64
-		err      error
-	}
-
-	var totalInserted int64
-	var insertMutex sync.Mutex
-	var hasError bool
-
-	// 创建分片任务 channel
-	shardChan := make(chan types.ShardRange, len(shards))
-	resultChan := make(chan *shardResult, len(shards))
-
-	// 填充分片任务
-	for _, shard := range shards {
-		shardChan <- shard
-	}
-	close(shardChan)
-
-	// 启动 worker
-	var wg sync.WaitGroup
-	for i := 0; i < cfg.ShardParallelism; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for shard := range shardChan {
-				inserted, err := m.processOffsetShard(tableName, shard)
-				resultChan <- &shardResult{inserted: inserted, err: err}
-			}
-		}()
-	}
-
-	// 等待完成
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// 收集结果
-	for result := range resultChan {
-		if result.err != nil {
-			log.Printf("[错误] 表 %s OFFSET 分片迁移失败: %v", tableName, result.err)
-			hasError = true
-			m.logger.LogTableDataError(tableName, "offset_shard", result.err.Error())
-		}
-		insertMutex.Lock()
-		totalInserted += result.inserted
-		insertMutex.Unlock()
-	}
-
-	if hasError {
-		return totalInserted, fmt.Errorf("部分分片迁移失败")
-	}
-	return totalInserted, nil
-}
-
-// processOffsetShard 处理单个 OFFSET 分片
-func (m *Migrator) processOffsetShard(tableName string, shard types.ShardRange) (int64, error) {
-	var inserted int64
-	err := m.dataReader.ReadTableDataByOffset(
-		tableName,
-		shard.Offset,
-		shard.Limit,
-		func(batch *types.DataBatch) error {
-			// 使用带重试的批量插入，最多重试3次
-			n, err := m.dataWriter.InsertBatchWithRetry(tableName, batch, 3)
-			if err != nil {
-				return err
-			}
-			inserted += n
-			return nil
-		},
-	)
-	return inserted, err
 }
 
 // migrateViews 迁移视图

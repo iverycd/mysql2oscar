@@ -2,30 +2,6 @@ package types
 
 import "time"
 
-// PrimaryKeyType 主键类型枚举
-type PrimaryKeyType int
-
-const (
-	// PKTypeNone 无主键
-	PKTypeNone PrimaryKeyType = iota
-	// PKTypeInteger 整数主键（支持范围分片）
-	PKTypeInteger
-	// PKTypeOther 其他类型主键（UUID/复合主键等）
-	PKTypeOther
-)
-
-// ShardRange 数据分片范围
-type ShardRange struct {
-	// 范围分片（整数主键）
-	StartValue interface{} // 分片起始值
-	EndValue   interface{} // 分片结束值（不包含）
-	// OFFSET 分片（其他类型主键）
-	Offset int64 // 偏移量
-	Limit  int64 // 分片大小
-	// 通用
-	ShardIndex int // 分片索引
-}
-
 // Column 表示数据库列的定义
 type Column struct {
 	Name         string
