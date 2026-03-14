@@ -32,6 +32,20 @@ func isBinaryType(databaseTypeName string) bool {
 	}
 }
 
+// isBitType 判断列类型是否为BIT类型
+func isBitType(databaseTypeName string) bool {
+	return strings.ToUpper(databaseTypeName) == "BIT"
+}
+
+// convertBitToInt 将BIT类型的[]byte转换为整数
+func convertBitToInt(b []byte) int64 {
+	var result int64
+	for _, by := range b {
+		result = (result << 8) | int64(by)
+	}
+	return result
+}
+
 // ReadTableData 流式读取表数据
 // 使用回调函数处理每一批数据
 func (r *DataReader) ReadTableData(tableName string, columns []string, callback func(batch *types.DataBatch) error) error {
@@ -61,12 +75,14 @@ func (r *DataReader) ReadTableData(tableName string, columns []string, callback 
 		return fmt.Errorf("获取列类型失败: %w", err)
 	}
 
-	// 记录哪些列是二进制类型
+	// 记录哪些列是二进制类型或BIT类型
 	isBinary := make([]bool, len(colInfos))
+	isBit := make([]bool, len(colInfos))
 	colNames := make([]string, len(colInfos))
 	for i, col := range colInfos {
 		colNames[i] = col.Name()
 		isBinary[i] = isBinaryType(col.DatabaseTypeName())
+		isBit[i] = isBitType(col.DatabaseTypeName())
 	}
 
 	batch := &types.DataBatch{
@@ -86,11 +102,14 @@ func (r *DataReader) ReadTableData(tableName string, columns []string, callback 
 			return fmt.Errorf("扫描数据行失败: %w", err)
 		}
 
-		// 根据列类型决定是否转换 []byte 为 string
+		// 根据列类型决定是否转换 []byte 为 string 或整数
 		for i := range values {
 			if b, ok := values[i].([]byte); ok {
-				// 只有非二进制类型才转换为字符串
-				if !isBinary[i] {
+				// BIT类型转换为整数
+				if isBit[i] {
+					values[i] = convertBitToInt(b)
+				} else if !isBinary[i] {
+					// 只有非二进制类型才转换为字符串
 					values[i] = string(b)
 				}
 				// 二进制类型保持 []byte 不变
