@@ -53,7 +53,9 @@ func (w *DataWriter) InsertBatch(tableName string, batch *types.DataBatch) (int6
 		result, err := tx.Exec(sql, row.Values...)
 		if err != nil {
 			tx.Rollback()
-			return inserted, fmt.Errorf("插入数据失败: %w", err)
+			// 输出完整的INSERT语句
+			fullSQL := w.formatInsertSQL(tableName, batch.Columns, []types.DataRow{row})
+			return inserted, fmt.Errorf("插入数据失败: %w\n完整INSERT语句:\n%s", err, fullSQL)
 		}
 
 		affected, _ := result.RowsAffected()
@@ -109,7 +111,9 @@ func (w *DataWriter) InsertBatchOptimized(tableName string, batch *types.DataBat
 	// 执行插入
 	result, err := w.client.Exec(sql.String(), allValues...)
 	if err != nil {
-		return 0, fmt.Errorf("批量插入数据失败: %w", err)
+		// 只输出第一行INSERT语句
+		fullSQL := w.formatInsertSQL(tableName, batch.Columns, []types.DataRow{batch.Rows[0]})
+		return 0, fmt.Errorf("批量插入数据失败: %w\n完整INSERT语句:\n%s", err, fullSQL)
 	}
 
 	return result.RowsAffected()
@@ -138,6 +142,57 @@ func (w *DataWriter) GetRowCount(tableName string) (int64, error) {
 // quoteIdentifier 引用标识符（转为小写）
 func (w *DataWriter) quoteIdentifier(name string) string {
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
+}
+
+// formatValue 将值格式化为SQL字符串
+func (w *DataWriter) formatValue(val interface{}) string {
+	if val == nil {
+		return "NULL"
+	}
+	switch v := val.(type) {
+	case string:
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''"))
+	case []byte:
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(string(v), "'", "''"))
+	case time.Time:
+		return fmt.Sprintf("'%s'", v.Format("2006-01-02 15:04:05"))
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%v", v)
+	case float32, float64:
+		return fmt.Sprintf("%v", v)
+	default:
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''"))
+	}
+}
+
+// formatInsertSQL 格式化完整的INSERT语句（包含实际值）
+func (w *DataWriter) formatInsertSQL(tableName string, columns []string, rows []types.DataRow) string {
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = w.quoteIdentifier(col)
+	}
+
+	var sb strings.Builder
+	for _, row := range rows {
+		sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES (",
+			w.quoteIdentifier(tableName),
+			strings.Join(quotedCols, ", ")))
+
+		for j, val := range row.Values {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(w.formatValue(val))
+		}
+		sb.WriteString(");\n")
+	}
+
+	return sb.String()
 }
 
 // InsertBatchWithRetry 带重试的批量插入
