@@ -40,6 +40,7 @@ type CountReport struct {
 	Results        []TableCountResult
 	StartTime      time.Time
 	EndTime        time.Time
+	S
 }
 
 func main() {
@@ -91,6 +92,10 @@ func compareTableCounts(cfg *config.Config) (*CountReport, error) {
 	report := &CountReport{
 		StartTime: time.Now(),
 	}
+rt, error) {
+	report := &CountReport{
+		StartTime: time.Now(),
+		SourceDSN
 
 	// 创建 MySQL 客户端
 	mysqlClient, err := mysql.NewClient(
@@ -262,6 +267,11 @@ func printReport(report *CountReport) {
 		report.MismatchTables,
 		report.FailedTables)
 
+,
+			r.TargetCount,
+			r.Difference,
+			status)
+	
 	// 如果有不匹配的表，列出详情
 	if report.MismatchTables > 0 {
 		fmt.Println("\n不匹配的表:")
@@ -331,5 +341,7 @@ func truncateError(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
+),
+			fmt.Sprintf("%d", r.
 	return s[:maxLen] + "..."
 }
