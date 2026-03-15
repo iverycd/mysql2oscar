@@ -471,7 +471,7 @@ func (w *SchemaWriter) quoteIdentifier(name string) string {
 }
 
 // generateIndexName 生成索引名称
-// 格式：idx_表名前8字符_列名前5字符_3位随机数字
+// 格式：idx_表名前8字符_列名前5字符_5位随机数字与英文字母的组合
 func (w *SchemaWriter) generateIndexName(tableName, columnName string) string {
 	// 截取表名前8个字符
 	tablePrefix := tableName
@@ -485,10 +485,14 @@ func (w *SchemaWriter) generateIndexName(tableName, columnName string) string {
 		colPrefix = colPrefix[:5]
 	}
 
-	// 生成3位随机数字
+	// 生成5位随机数字与英文字母组合
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomNum := r.Intn(1000)
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	randomStr := make([]byte, 5)
+	for i := range randomStr {
+		randomStr[i] = charset[r.Intn(len(charset))]
+	}
 
 	// 转为小写
-	return fmt.Sprintf("idx_%s_%s_%03d", strings.ToLower(tablePrefix), strings.ToLower(colPrefix), randomNum)
+	return fmt.Sprintf("idx_%s_%s_%s", strings.ToLower(tablePrefix), strings.ToLower(colPrefix), randomStr)
 }
