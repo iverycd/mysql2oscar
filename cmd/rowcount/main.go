@@ -40,7 +40,8 @@ type CountReport struct {
 	Results        []TableCountResult
 	StartTime      time.Time
 	EndTime        time.Time
-	S
+	SourceDSN      string // 源数据库连接串
+	TargetDSN      string // 目标数据库连接串
 }
 
 func main() {
@@ -91,11 +92,9 @@ func main() {
 func compareTableCounts(cfg *config.Config) (*CountReport, error) {
 	report := &CountReport{
 		StartTime: time.Now(),
+		SourceDSN: fmt.Sprintf("%s@tcp(%s:%d)/%s", cfg.Source.User, cfg.Source.Host, cfg.Source.Port, cfg.Source.Database),
+		TargetDSN: fmt.Sprintf("%s@%s:%d/%s", cfg.Target.Username, cfg.Target.Host, cfg.Target.Port, cfg.Target.Database),
 	}
-rt, error) {
-	report := &CountReport{
-		StartTime: time.Now(),
-		SourceDSN
 
 	// 创建 MySQL 客户端
 	mysqlClient, err := mysql.NewClient(
@@ -265,13 +264,11 @@ func printReport(report *CountReport) {
 		report.TotalTables,
 		report.MatchedTables,
 		report.MismatchTables,
-		report.FailedTables)
+		report.FailedTables,
+	)
+	fmt.Printf("源库: %s\n", report.SourceDSN)
+	fmt.Printf("目标: %s\n", report.TargetDSN)
 
-,
-			r.TargetCount,
-			r.Difference,
-			status)
-	
 	// 如果有不匹配的表，列出详情
 	if report.MismatchTables > 0 {
 		fmt.Println("\n不匹配的表:")
@@ -341,7 +338,5 @@ func truncateError(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-),
-			fmt.Sprintf("%d", r.
 	return s[:maxLen] + "..."
 }
