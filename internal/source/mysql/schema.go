@@ -412,3 +412,64 @@ func (r *SchemaReader) GetAutoIncrementInfo() (map[string]AutoIncrementInfo, err
 
 	return result, nil
 }
+
+// PrimaryKeyInfo 主键信息
+type PrimaryKeyInfo struct {
+	ColumnName string
+	DataType   string // 数据类型名称
+	IsInteger  bool   // 是否为整数类型
+	IsString   bool   // 是否为字符串类型
+}
+
+// GetPrimaryKeyInfo 获取表的主键信息
+// 返回主键列名、数据类型、是否为整数/字符串类型
+func (r *SchemaReader) GetPrimaryKeyInfo(tableName string) (*PrimaryKeyInfo, error) {
+	query := `
+		SELECT COLUMN_NAME, DATA_TYPE
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI'
+		LIMIT 1
+	`
+
+	var columnName, dataType string
+	err := r.client.db.QueryRow(query, r.client.dbName, tableName).Scan(&columnName, &dataType)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // 无主键
+		}
+		return nil, fmt.Errorf("查询主键信息失败: %w", err)
+	}
+
+	// 判断主键类型
+	isInteger := isIntegerType(dataType)
+	isString := isStringType(dataType)
+
+	return &PrimaryKeyInfo{
+		ColumnName: columnName,
+		DataType:   dataType,
+		IsInteger:  isInteger,
+		IsString:   isString,
+	}, nil
+}
+
+// isStringType 判断 MySQL 数据类型是否为字符串类型
+func isStringType(dataType string) bool {
+	lower := strings.ToLower(dataType)
+	switch lower {
+	case "char", "varchar", "binary", "varbinary", "text", "tinytext", "mediumtext", "longtext":
+		return true
+	default:
+		return false
+	}
+}
+
+// isIntegerType 判断 MySQL 数据类型是否为整数类型
+func isIntegerType(dataType string) bool {
+	lower := strings.ToLower(dataType)
+	switch lower {
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint":
+		return true
+	default:
+		return false
+	}
+}

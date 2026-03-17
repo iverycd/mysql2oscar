@@ -86,3 +86,49 @@ type MigrationResult struct {
 	FailedTables   []string
 	FailedViews    []string
 }
+
+// ChunkMetadata 表示分片元数据
+type ChunkMetadata struct {
+	TableName  string
+	ChunkID    int
+	StartValue int64  // 起始主键值
+	EndValue   int64  // 结束主键值（不包含）
+	Status     string // pending/running/completed/failed
+}
+
+// ChunkStrategy 分片策略
+type ChunkStrategy int
+
+const (
+	// ChunkStrategyNone 不分片（单线程）
+	ChunkStrategyNone ChunkStrategy = iota
+	// ChunkStrategyRange 基于整数主键范围分片
+	ChunkStrategyRange
+	// ChunkStrategyOffset 基于OFFSET/LIMIT分片（用于字符串/UUID主键）
+	ChunkStrategyOffset
+)
+
+// ChunkPlan 分片计划
+type ChunkPlan struct {
+	Strategy     ChunkStrategy
+	PKColumn     string        // 主键列名
+	MinValue     int64         // 主键最小值（仅整数主键）
+	MaxValue     int64         // 主键最大值（仅整数主键）
+	ChunkSize    int64         // 每个分片的大小
+	NumChunks    int           // 分片数量
+	Chunks       []ChunkRange  // 分片范围列表（整数主键）
+	OffsetChunks []OffsetChunk // 偏移分片列表（字符串主键）
+}
+
+// ChunkRange 单个分片的范围（整数主键）
+type ChunkRange struct {
+	Start int64
+	End   int64
+}
+
+// OffsetChunk 偏移分片（字符串主键）
+type OffsetChunk struct {
+	ChunkID int
+	Offset  int64
+	Limit   int64
+}

@@ -112,8 +112,9 @@ func (w *DataWriter) InsertBatchOptimized(tableName string, batch *types.DataBat
 	result, err := w.client.Exec(sql.String(), allValues...)
 	if err != nil {
 		// 只输出第一行INSERT语句
-		fullSQL := w.formatInsertSQL(tableName, batch.Columns, []types.DataRow{batch.Rows[0]})
-		return 0, fmt.Errorf("批量插入数据失败: %w\n完整INSERT语句:\n%s", err, fullSQL)
+		//fullSQL := w.formatInsertSQL(tableName, batch.Columns, []types.DataRow{batch.Rows[0]})
+		//return 0, fmt.Errorf("批量插入数据失败: %w\n完整INSERT语句:\n%s", err, fullSQL)
+		return 0, fmt.Errorf("批量插入数据失败: %w", err)
 	}
 
 	return result.RowsAffected()

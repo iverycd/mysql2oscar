@@ -287,6 +287,153 @@ func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[stri
 
 // migrateTableDataWithWriter 使用指定的 DataWriter 迁移表数据
 func (m *Migrator) migrateTableDataWithWriter(tableName string, columns []types.Column, dataWriter *oscar.DataWriter) (int64, error) {
+	// 1. 获取表行数
+	totalRows, err := m.dataReader.GetRowCount(tableName)
+	if err != nil {
+		log.Printf("[警告] 表 %s: 获取行数失败，使用单线程迁移: %v", tableName, err)
+		totalRows = 0
+	}
+
+	// 2. 规划分片策略
+	plan := m.planChunking(tableName, totalRows)
+
+	// 3. 根据策略选择迁移方式
+	if plan.Strategy == types.ChunkStrategyRange || plan.Strategy == types.ChunkStrategyOffset {
+		strategyName := "整数主键范围分片"
+		if plan.Strategy == types.ChunkStrategyOffset {
+			strategyName = "字符串主键偏移分片"
+		}
+		log.Printf("[分片] 表 %s: 使用%s (行数: %d, 分片数: %d, 并行度: %d)",
+			tableName, strategyName, totalRows, plan.NumChunks, m.cfg.Migration.ChunkParallelism)
+		return m.migrateTableDataWithChunking(tableName, columns, dataWriter, plan)
+	}
+
+	// 降级为原有单线程
+	log.Printf("[单线程] 表 %s: 使用单线程迁移 (行数: %d)", tableName, totalRows)
+	return m.migrateTableDataSequential(tableName, columns, dataWriter)
+}
+
+// planChunking 规划分片策略
+func (m *Migrator) planChunking(tableName string, totalRows int64) *types.ChunkPlan {
+	plan := &types.ChunkPlan{
+		Strategy: types.ChunkStrategyNone,
+	}
+
+	// 检查是否满足分片条件
+	// 条件1：行数超过阈值
+	if totalRows < m.cfg.Migration.ChunkThreshold {
+		return plan
+	}
+
+	// 条件2：有主键
+	pkInfo, err := m.schemaReader.GetPrimaryKeyInfo(tableName)
+	if err != nil || pkInfo == nil {
+		log.Printf("[分片] 表 %s: 无主键，使用单线程", tableName)
+		return plan
+	}
+
+	// 获取分片大小
+	chunkSize := m.cfg.Migration.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10000
+	}
+
+	// 根据主键类型选择分片策略
+	if pkInfo.IsInteger {
+		// 整数主键：使用范围分片
+		return m.planIntegerChunking(tableName, totalRows, pkInfo, chunkSize)
+	} else if pkInfo.IsString {
+		// 字符串主键：使用 OFFSET 分片
+		return m.planOffsetChunking(tableName, totalRows, pkInfo, chunkSize)
+	}
+
+	log.Printf("[分片] 表 %s: 主键 '%s' 类型 '%s' 不支持分片，使用单线程", tableName, pkInfo.ColumnName, pkInfo.DataType)
+	return plan
+}
+
+// planIntegerChunking 规划整数主键的分片策略
+func (m *Migrator) planIntegerChunking(tableName string, totalRows int64, pkInfo *mysql.PrimaryKeyInfo, chunkSize int64) *types.ChunkPlan {
+	plan := &types.ChunkPlan{
+		Strategy:  types.ChunkStrategyNone,
+		PKColumn:  pkInfo.ColumnName,
+		ChunkSize: chunkSize,
+	}
+
+	// 获取主键范围
+	minVal, maxVal, err := m.dataReader.GetPrimaryKeyRange(tableName, pkInfo.ColumnName)
+	if err != nil {
+		log.Printf("[分片] 表 %s: 获取主键范围失败: %v", tableName, err)
+		return plan
+	}
+
+	// 空表
+	if minVal == 0 && maxVal == 0 {
+		return plan
+	}
+
+	// 计算分片数量
+	rangeSize := maxVal - minVal + 1
+	numChunks := int((rangeSize + chunkSize - 1) / chunkSize)
+	if numChunks < 1 {
+		numChunks = 1
+	}
+
+	// 生成分片范围
+	chunks := make([]types.ChunkRange, 0, numChunks)
+	for i := 0; i < numChunks; i++ {
+		start := minVal + int64(i)*chunkSize
+		end := minVal + int64(i+1)*chunkSize
+		if end > maxVal+1 {
+			end = maxVal + 1
+		}
+		chunks = append(chunks, types.ChunkRange{Start: start, End: end})
+	}
+
+	plan.Strategy = types.ChunkStrategyRange
+	plan.MinValue = minVal
+	plan.MaxValue = maxVal
+	plan.NumChunks = numChunks
+	plan.Chunks = chunks
+
+	log.Printf("[分片] 表 %s: 整数主键分片 (范围: %d-%d, 分片数: %d)", tableName, minVal, maxVal, numChunks)
+	return plan
+}
+
+// planOffsetChunking 规划字符串主键的分片策略
+func (m *Migrator) planOffsetChunking(tableName string, totalRows int64, pkInfo *mysql.PrimaryKeyInfo, chunkSize int64) *types.ChunkPlan {
+	plan := &types.ChunkPlan{
+		Strategy:  types.ChunkStrategyNone,
+		PKColumn:  pkInfo.ColumnName,
+		ChunkSize: chunkSize,
+	}
+
+	// 计算分片数量
+	numChunks := int((totalRows + chunkSize - 1) / chunkSize)
+	if numChunks < 1 {
+		numChunks = 1
+	}
+
+	// 生成偏移分片
+	offsetChunks := make([]types.OffsetChunk, 0, numChunks)
+	for i := 0; i < numChunks; i++ {
+		offset := int64(i) * chunkSize
+		offsetChunks = append(offsetChunks, types.OffsetChunk{
+			ChunkID: i,
+			Offset:  offset,
+			Limit:   chunkSize,
+		})
+	}
+
+	plan.Strategy = types.ChunkStrategyOffset
+	plan.NumChunks = numChunks
+	plan.OffsetChunks = offsetChunks
+
+	log.Printf("[分片] 表 %s: 字符串主键分片 (总行数: %d, 分片数: %d)", tableName, totalRows, numChunks)
+	return plan
+}
+
+// migrateTableDataSequential 单线程顺序迁移（原有逻辑）
+func (m *Migrator) migrateTableDataSequential(tableName string, columns []types.Column, dataWriter *oscar.DataWriter) (int64, error) {
 	var totalRows int64
 
 	// 获取列名
@@ -313,6 +460,238 @@ func (m *Migrator) migrateTableDataWithWriter(tableName string, columns []types.
 	})
 
 	return totalRows, err
+}
+
+// chunkResult 分片迁移结果
+type chunkResult struct {
+	chunkID int
+	rows    int64
+	err     error
+}
+
+// migrateTableDataWithChunking 分片并行迁移
+func (m *Migrator) migrateTableDataWithChunking(tableName string, columns []types.Column, dataWriter *oscar.DataWriter, plan *types.ChunkPlan) (int64, error) {
+	// 获取列名
+	colNames := make([]string, len(columns))
+	for i, col := range columns {
+		colNames[i] = col.Name
+	}
+
+	// 根据分片策略选择执行方式
+	switch plan.Strategy {
+	case types.ChunkStrategyRange:
+		return m.migrateWithRangeChunking(tableName, colNames, dataWriter, plan)
+	case types.ChunkStrategyOffset:
+		return m.migrateWithOffsetChunking(tableName, colNames, dataWriter, plan)
+	default:
+		return 0, fmt.Errorf("未知的分片策略: %v", plan.Strategy)
+	}
+}
+
+// migrateWithRangeChunking 整数主键范围分片迁移
+func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string, dataWriter *oscar.DataWriter, plan *types.ChunkPlan) (int64, error) {
+	// 创建分片任务通道
+	chunkChan := make(chan types.ChunkRange, len(plan.Chunks))
+	resultChan := make(chan chunkResult, len(plan.Chunks))
+
+	// 发送所有分片任务
+	for _, chunk := range plan.Chunks {
+		chunkChan <- chunk
+	}
+	close(chunkChan)
+
+	// 并行处理分片
+	parallelism := m.cfg.Migration.ChunkParallelism
+	if parallelism < 1 {
+		parallelism = 2
+	}
+	if parallelism > len(plan.Chunks) {
+		parallelism = len(plan.Chunks)
+	}
+
+	var wg sync.WaitGroup
+	var totalRows int64
+	var firstError error
+	var errorMutex sync.Mutex
+
+	// 启动 worker（每个 worker 使用独立的 Oscar 连接）
+	for i := 0; i < parallelism; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			// 为每个 worker 创建独立的 Oscar 连接
+			workerClient, err := m.createTempClient()
+			if err != nil {
+				errorMutex.Lock()
+				if firstError == nil {
+					firstError = fmt.Errorf("worker %d 创建连接失败: %w", workerID, err)
+				}
+				errorMutex.Unlock()
+				return
+			}
+			defer workerClient.Close()
+
+			// 创建独立的 DataWriter
+			workerDataWriter := oscar.NewDataWriter(workerClient)
+
+			// worker 本地的行数计数器
+			var workerRows int64
+
+			for chunk := range chunkChan {
+				// 读取分片数据并写入
+				err := m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumn, chunk.Start, chunk.End, func(batch *types.DataBatch) error {
+					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3)
+					if err != nil {
+						return err
+					}
+					workerRows += inserted
+					atomic.AddInt64(&totalRows, inserted)
+
+					// 每批次输出进度
+					if workerRows > 0 && workerRows%5000 == 0 {
+						log.Printf("[Worker-%d] 表 %s 分片[%d,%d): 已插入 %d 行", workerID, tableName, chunk.Start, chunk.End, workerRows)
+					}
+					return nil
+				})
+
+				result := chunkResult{err: err}
+				resultChan <- result
+
+				if err != nil {
+					errorMutex.Lock()
+					if firstError == nil {
+						firstError = fmt.Errorf("分片 [%d, %d) 失败: %w", chunk.Start, chunk.End, err)
+					}
+					errorMutex.Unlock()
+					return
+				}
+
+				// 分片完成日志
+				log.Printf("[Worker-%d] 表 %s 分片[%d,%d) 完成: %d 行", workerID, tableName, chunk.Start, chunk.End, workerRows)
+			}
+		}(i)
+	}
+
+	// 等待所有 worker 完成
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// 收集结果
+	for range resultChan {
+	}
+
+	if firstError != nil {
+		return totalRows, firstError
+	}
+
+	log.Printf("[完成] 表 %s: 范围分片迁移完成，共 %d 行", tableName, totalRows)
+	return totalRows, nil
+}
+
+// migrateWithOffsetChunking 字符串主键偏移分片迁移
+func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string, dataWriter *oscar.DataWriter, plan *types.ChunkPlan) (int64, error) {
+	// 创建分片任务通道
+	chunkChan := make(chan types.OffsetChunk, len(plan.OffsetChunks))
+	resultChan := make(chan chunkResult, len(plan.OffsetChunks))
+
+	// 发送所有分片任务
+	for _, chunk := range plan.OffsetChunks {
+		chunkChan <- chunk
+	}
+	close(chunkChan)
+
+	// 并行处理分片
+	parallelism := m.cfg.Migration.ChunkParallelism
+	if parallelism < 1 {
+		parallelism = 2
+	}
+	if parallelism > len(plan.OffsetChunks) {
+		parallelism = len(plan.OffsetChunks)
+	}
+
+	var wg sync.WaitGroup
+	var totalRows int64
+	var firstError error
+	var errorMutex sync.Mutex
+
+	// 启动 worker（每个 worker 使用独立的 Oscar 连接）
+	for i := 0; i < parallelism; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			// 为每个 worker 创建独立的 Oscar 连接
+			workerClient, err := m.createTempClient()
+			if err != nil {
+				errorMutex.Lock()
+				if firstError == nil {
+					firstError = fmt.Errorf("worker %d 创建连接失败: %w", workerID, err)
+				}
+				errorMutex.Unlock()
+				return
+			}
+			defer workerClient.Close()
+
+			// 创建独立的 DataWriter
+			workerDataWriter := oscar.NewDataWriter(workerClient)
+
+			// worker 本地的行数计数器
+			var workerRows int64
+
+			for chunk := range chunkChan {
+				// 读取分片数据并写入
+				err := m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumn, chunk.Offset, chunk.Limit, func(batch *types.DataBatch) error {
+					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3)
+					if err != nil {
+						return err
+					}
+					workerRows += inserted
+					atomic.AddInt64(&totalRows, inserted)
+
+					// 每批次输出进度
+					if workerRows > 0 && workerRows%5000 == 0 {
+						log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d): 已插入 %d 行", workerID, tableName, chunk.ChunkID, chunk.Offset, workerRows)
+					}
+					return nil
+				})
+
+				result := chunkResult{chunkID: chunk.ChunkID, err: err}
+				resultChan <- result
+
+				if err != nil {
+					errorMutex.Lock()
+					if firstError == nil {
+						firstError = fmt.Errorf("偏移分片 %d (offset=%d) 失败: %w", chunk.ChunkID, chunk.Offset, err)
+					}
+					errorMutex.Unlock()
+					return
+				}
+
+				// 分片完成日志
+				log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d) 完成: %d 行", workerID, tableName, chunk.ChunkID, chunk.Offset, workerRows)
+			}
+		}(i)
+	}
+
+	// 等待所有 worker 完成
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// 收集结果
+	for range resultChan {
+	}
+
+	if firstError != nil {
+		return totalRows, firstError
+	}
+
+	log.Printf("[完成] 表 %s: 偏移分片迁移完成，共 %d 行", tableName, totalRows)
+	return totalRows, nil
 }
 
 // Close 关闭资源
