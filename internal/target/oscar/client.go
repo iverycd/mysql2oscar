@@ -18,8 +18,8 @@ type Client struct {
 // NewClient 创建 Oscar 客户端
 // maxConns: 最大连接数，应设置为 parallelism + 缓冲
 func NewClient(host, username, password, database string, port int, maxConns int) (*Client, error) {
-	// 构建连接字符串
-	connStr := fmt.Sprintf("%s/%s@%s:%d/%s?trace_level=3&trace_file_path='/tmp/log/'", username, password, host, port, database)
+	// 构建连接字符串,debug参数：?trace_level=3&trace_file_path='/tmp/log/'
+	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
 
 	db, err := sql.Open("aci", connStr)
 	if err != nil {
@@ -40,6 +40,31 @@ func NewClient(host, username, password, database string, port int, maxConns int
 	return &Client{
 		db: db,
 	}, nil
+}
+
+// NewTempClient 创建临时连接（不使用连接池，用于表级别迁移）
+// 每次迁移完一个表后关闭，避免连接长时间复用导致失效
+func NewTempClient(host, username, password, database string, port int) (*Client, error) {
+	// 构建连接字符串（不使用 trace 减少日志输出）
+	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
+
+	db, err := sql.Open("aci", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("连接 Oscar 失败: %w", err)
+	}
+
+	// 测试连接
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("Oscar 连接测试失败: %w", err)
+	}
+
+	// 设置最小连接池（单表迁移只需一个连接）
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0) // 由调用方控制生命周期
+
+	return &Client{db: db}, nil
 }
 
 // Close 关闭连接
