@@ -38,15 +38,14 @@ func main() {
 		log.Fatalf("加载配置文件失败: %v", err)
 	}
 
-	log.Printf("开始迁移: MySQL %s:%d/%s -> Oscar %s",
-		cfg.Source.Host, cfg.Source.Port, cfg.Source.Database, cfg.Target.Username)
+	log.Printf("开始迁移: MySQL %s:%d/%s ->  Oscar %s:%d/%s 用户:%s",
+		cfg.Source.Host, cfg.Source.Port, cfg.Source.Database, cfg.Target.Host, cfg.Target.Port, cfg.Target.Database, cfg.Target.Username)
 
 	// 创建迁移器
 	m, err := migrator.New(cfg)
 	if err != nil {
 		log.Fatalf("创建迁移器失败: %v", err)
 	}
-	defer m.Close()
 
 	// 设置源数据库名（用于视图转换时移除数据库前缀）
 	m.SetSourceDB(cfg.Source.Database)
@@ -54,10 +53,14 @@ func main() {
 	// 执行迁移
 	result, err := m.Migrate()
 	if err != nil {
+		m.Close() // 确保错误情况下也关闭连接
 		log.Fatalf("迁移失败: %v", err)
 	}
 
-	// 输出结果
+	// 先关闭连接和日志文件
+	m.Close()
+
+	// 最后输出结果
 	fmt.Println("\n迁移完成!")
 	fmt.Printf("  表迁移: 成功 %d, 失败 %d\n", result.TablesMigrated, result.TablesFailed)
 	fmt.Printf("  视图迁移: 成功 %d, 失败 %d\n", result.ViewsMigrated, result.ViewsFailed)

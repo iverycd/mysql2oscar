@@ -19,7 +19,7 @@ type Client struct {
 // maxConns: 最大连接数，应设置为 parallelism + 缓冲
 func NewClient(host, username, password, database string, port int, maxConns int) (*Client, error) {
 	// 构建连接字符串
-	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
+	connStr := fmt.Sprintf("%s/%s@%s:%d/%s?trace_level=3&trace_file_path='/tmp/log/'", username, password, host, port, database)
 
 	db, err := sql.Open("aci", connStr)
 	if err != nil {
