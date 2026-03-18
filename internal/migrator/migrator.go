@@ -53,9 +53,14 @@ func New(cfg *config.Config) (*Migrator, error) {
 	}
 
 	// 计算连接池大小
-	maxConns := cfg.Migration.Parallelism + 5 // 缓冲
+	// 考虑：表级并行度 × 分片并行度 + 缓冲
+	chunkParallelism := cfg.Migration.ChunkParallelism
+	if chunkParallelism < 1 {
+		chunkParallelism = 2 // 默认值
+	}
+	maxConns := cfg.Migration.Parallelism*chunkParallelism + 5 // 缓冲
 
-	log.Printf("[连接池] MySQL 最大连接数: %d (parallelism=%d)", maxConns, cfg.Migration.Parallelism)
+	log.Printf("[连接池] MySQL 最大连接数: %d (表并行=%d, 分片并行=%d)", maxConns, cfg.Migration.Parallelism, chunkParallelism)
 
 	// 创建 MySQL 客户端
 	mysqlClient, err := mysql.NewClient(
