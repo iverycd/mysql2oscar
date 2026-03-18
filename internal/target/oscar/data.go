@@ -196,9 +196,16 @@ func (w *DataWriter) formatInsertSQL(tableName string, columns []string, rows []
 	return sb.String()
 }
 
+// SetClient 更新 DataWriter 的数据库连接
+// 用于连接断开后重建连接
+func (w *DataWriter) SetClient(client *Client) {
+	w.client = client
+}
+
 // InsertBatchWithRetry 带重试的批量插入
 // 用于处理 Oscar ODBC 驱动在高并发时的连接不稳定问题
-func (w *DataWriter) InsertBatchWithRetry(tableName string, batch *types.DataBatch, maxRetries int) (int64, error) {
+// reconnectFunc: 连接重建函数，返回新的 Client 以便更新 DataWriter
+func (w *DataWriter) InsertBatchWithRetry(tableName string, batch *types.DataBatch, maxRetries int, reconnectFunc func() (*Client, error)) (int64, error) {
 	var lastErr error
 	for i := 0; i < maxRetries; i++ {
 		inserted, err := w.InsertBatchOptimized(tableName, batch)
@@ -211,6 +218,15 @@ func (w *DataWriter) InsertBatchWithRetry(tableName string, batch *types.DataBat
 		if strings.Contains(errMsg, "bad connection") ||
 			strings.Contains(errMsg, "driver") ||
 			strings.Contains(errMsg, "connection") {
+			// 尝试重建连接并更新 DataWriter
+			if reconnectFunc != nil {
+				newClient, reconnectErr := reconnectFunc()
+				if reconnectErr != nil {
+					fmt.Printf("[重试] 重建连接失败: %v\n", reconnectErr)
+				} else {
+					w.SetClient(newClient) // 关键：更新当前 DataWriter 的连接
+				}
+			}
 			// 指数退避
 			sleepTime := time.Duration(i+1) * time.Second
 			if sleepTime > 5*time.Second {

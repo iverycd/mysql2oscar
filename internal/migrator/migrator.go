@@ -449,8 +449,8 @@ func (m *Migrator) migrateTableDataSequential(tableName string, columns []types.
 
 	// 流式读取并批量写入
 	err := m.dataReader.ReadTableData(tableName, colNames, func(batch *types.DataBatch) error {
-		// 使用带重试的批量插入，最多重试3次
-		inserted, err := dataWriter.InsertBatchWithRetry(tableName, batch, 3)
+		// 使用带重试的批量插入，最多重试3次（单线程模式不需要重连功能）
+		inserted, err := dataWriter.InsertBatchWithRetry(tableName, batch, 3, nil)
 		if err != nil {
 			return err
 		}
@@ -525,7 +525,7 @@ func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string,
 		go func(workerID int) {
 			defer wg.Done()
 
-			// 为每个 worker 创建独立的 Oscar 连接
+			// 为每个 worker 创建独立的 Oscar 连接（使用指针以便在闭包内修改）
 			workerClient, err := m.createTempClient()
 			if err != nil {
 				errorMutex.Lock()
@@ -537,8 +537,24 @@ func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string,
 			}
 			defer workerClient.Close()
 
-			// 创建独立的 DataWriter
+			// 创建独立的 DataWriter（使用指针以便在闭包内修改）
 			workerDataWriter := oscar.NewDataWriter(workerClient)
+
+			// 定义重建连接函数（返回新的 Client）
+			reconnectFunc := func() (*oscar.Client, error) {
+				// 关闭旧连接
+				if workerClient != nil {
+					workerClient.Close()
+				}
+				// 创建新连接
+				newClient, err := m.createTempClient()
+				if err != nil {
+					return nil, err
+				}
+				workerClient = newClient
+				log.Printf("[Worker-%d] 重建连接成功", workerID)
+				return workerClient, nil
+			}
 
 			// worker 本地的行数计数器
 			var workerRows int64
@@ -546,7 +562,7 @@ func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string,
 			for chunk := range chunkChan {
 				// 读取分片数据并写入
 				err := m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumn, chunk.Start, chunk.End, func(batch *types.DataBatch) error {
-					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3)
+					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3, reconnectFunc)
 					if err != nil {
 						return err
 					}
@@ -628,7 +644,7 @@ func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string
 		go func(workerID int) {
 			defer wg.Done()
 
-			// 为每个 worker 创建独立的 Oscar 连接
+			// 为每个 worker 创建独立的 Oscar 连接（使用指针以便在闭包内修改）
 			workerClient, err := m.createTempClient()
 			if err != nil {
 				errorMutex.Lock()
@@ -640,8 +656,24 @@ func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string
 			}
 			defer workerClient.Close()
 
-			// 创建独立的 DataWriter
+			// 创建独立的 DataWriter（使用指针以便在闭包内修改）
 			workerDataWriter := oscar.NewDataWriter(workerClient)
+
+			// 定义重建连接函数（���回新的 Client）
+			reconnectFunc := func() (*oscar.Client, error) {
+				// 关闭旧连接
+				if workerClient != nil {
+					workerClient.Close()
+				}
+				// 创建新连接
+				newClient, err := m.createTempClient()
+				if err != nil {
+					return nil, err
+				}
+				workerClient = newClient
+				log.Printf("[Worker-%d] 重建连接成功", workerID)
+				return workerClient, nil
+			}
 
 			// worker 本地的行数计数器
 			var workerRows int64
@@ -649,7 +681,7 @@ func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string
 			for chunk := range chunkChan {
 				// 读取分片数据并写入
 				err := m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumn, chunk.Offset, chunk.Limit, func(batch *types.DataBatch) error {
-					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3)
+					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3, reconnectFunc)
 					if err != nil {
 						return err
 					}
