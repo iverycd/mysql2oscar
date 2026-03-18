@@ -139,7 +139,7 @@ type tableResult struct {
 }
 
 // migrateSingleTable 迁移单个表（使用独立连接）
-// 包含完整的四阶段迁移：创建表结构���迁移数据、创建索引和外键、设置自增列
+// 包含完整的四阶段迁移：创建表结构迁移数据、创建索引和外键、设置自增列
 func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo) *tableResult {
 	result := &tableResult{tableName: tableName}
 
@@ -163,6 +163,25 @@ func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[stri
 	// 3. 创建 SchemaWriter 和 DataWriter
 	schemaWriter := oscar.NewSchemaWriter(client)
 	dataWriter := oscar.NewDataWriter(client)
+
+	// 定义重建连接函数（用于数据迁移时连接断开重连）
+	reconnectFunc := func() (*oscar.Client, error) {
+		// 关闭旧连接
+		if client != nil {
+			client.Close()
+		}
+		// 创建新连接
+		newClient, err := m.createTempClient()
+		if err != nil {
+			return nil, err
+		}
+		client = newClient
+		// 更新 schemaWriter 和 dataWriter 的连接
+		schemaWriter.SetClient(client)
+		dataWriter.SetClient(client)
+		log.Printf("[表 %s] 重建连接成功", tableName)
+		return client, nil
+	}
 
 	// 4. 处理已存在的表
 	if m.cfg.Migration.Overwrite {
@@ -210,7 +229,7 @@ func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[stri
 	}
 
 	// 8. 迁移数据
-	rowCount, err := m.migrateTableDataWithWriter(tableName, table.Columns, dataWriter)
+	rowCount, err := m.migrateTableDataWithWriter(tableName, table.Columns, dataWriter, reconnectFunc)
 	if err != nil {
 		result.err = err
 		result.errMsg = fmt.Sprintf("迁移数据失败: %v", err)
@@ -291,7 +310,7 @@ func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[stri
 }
 
 // migrateTableDataWithWriter 使用指定的 DataWriter 迁移表数据
-func (m *Migrator) migrateTableDataWithWriter(tableName string, columns []types.Column, dataWriter *oscar.DataWriter) (int64, error) {
+func (m *Migrator) migrateTableDataWithWriter(tableName string, columns []types.Column, dataWriter *oscar.DataWriter, reconnectFunc func() (*oscar.Client, error)) (int64, error) {
 	// 1. 获取表行数
 	totalRows, err := m.dataReader.GetRowCount(tableName)
 	if err != nil {
@@ -315,7 +334,7 @@ func (m *Migrator) migrateTableDataWithWriter(tableName string, columns []types.
 
 	// 降级为原有单线程
 	log.Printf("[单线程] 表 %s: 使用单线程迁移 (行数: %d)", tableName, totalRows)
-	return m.migrateTableDataSequential(tableName, columns, dataWriter)
+	return m.migrateTableDataSequential(tableName, columns, dataWriter, reconnectFunc)
 }
 
 // planChunking 规划分片策略
@@ -438,7 +457,7 @@ func (m *Migrator) planOffsetChunking(tableName string, totalRows int64, pkInfo 
 }
 
 // migrateTableDataSequential 单线程顺序迁移（原有逻辑）
-func (m *Migrator) migrateTableDataSequential(tableName string, columns []types.Column, dataWriter *oscar.DataWriter) (int64, error) {
+func (m *Migrator) migrateTableDataSequential(tableName string, columns []types.Column, dataWriter *oscar.DataWriter, reconnectFunc func() (*oscar.Client, error)) (int64, error) {
 	var totalRows int64
 
 	// 获取列名
@@ -449,8 +468,8 @@ func (m *Migrator) migrateTableDataSequential(tableName string, columns []types.
 
 	// 流式读取并批量写入
 	err := m.dataReader.ReadTableData(tableName, colNames, func(batch *types.DataBatch) error {
-		// 使用带重试的批量插入，最多重试3次（单线程模式不需要重连功能）
-		inserted, err := dataWriter.InsertBatchWithRetry(tableName, batch, 3, nil)
+		// 使用带重试的批量插入，最多重试3次（支持连接断开后重连）
+		inserted, err := dataWriter.InsertBatchWithRetry(tableName, batch, 3, reconnectFunc)
 		if err != nil {
 			return err
 		}

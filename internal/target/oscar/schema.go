@@ -21,6 +21,11 @@ func NewSchemaWriter(client *Client) *SchemaWriter {
 	return &SchemaWriter{client: client}
 }
 
+// SetClient 设置客户端连接（用于连接断开后重建连接）
+func (w *SchemaWriter) SetClient(client *Client) {
+	w.client = client
+}
+
 // CreateTableWithoutAutoIncr 创建表但不包含自增属性（用于神通数据库）
 // 神通数据库需要先创建表，再创建唯一索引，最后设置自增属性
 // 返回生成的 SQL 语句和可能的错误
