@@ -29,9 +29,10 @@ type Logger struct {
 }
 
 type logFile struct {
-	file    *os.File
-	logger  *log.Logger
-	enabled bool
+	filename string   // 日志文件名
+	file     *os.File // 文件句柄（首次写入时创建）
+	logger   *log.Logger
+	once     sync.Once // 保证只创建一次
 }
 
 // NewLogger 创建日志管理器
@@ -54,33 +55,31 @@ func NewLogger() (*Logger, error) {
 		timestampDir: timestampDir,
 	}
 
-	// 初始化各类日志文件
-	l.tableCreateFailed = l.createLogFile("tableCreateFailed.log")
-	l.fkCreateFailed = l.createLogFile("FkCreateFailed.log")
-	l.idxCreateFailed = l.createLogFile("idxCreateFailed.log")
-	l.seqCreateFailed = l.createLogFile("seqCreateFailed.log")
-	l.viewCreateFailed = l.createLogFile("viewCreateFailed.log")
-	l.autoIncrFailed = l.createLogFile("autoIncrFailed.log")
-	l.constraintFailed = l.createLogFile("constraintFailed.log")
-	l.errorTableData = l.createLogFile("errorTableData.log")
+	// 初始化各类日志文件（懒加载，只设置文件名）
+	l.tableCreateFailed = &logFile{filename: "tableCreateFailed.log"}
+	l.fkCreateFailed = &logFile{filename: "FkCreateFailed.log"}
+	l.idxCreateFailed = &logFile{filename: "idxCreateFailed.log"}
+	l.seqCreateFailed = &logFile{filename: "seqCreateFailed.log"}
+	l.viewCreateFailed = &logFile{filename: "viewCreateFailed.log"}
+	l.autoIncrFailed = &logFile{filename: "autoIncrFailed.log"}
+	l.constraintFailed = &logFile{filename: "constraintFailed.log"}
+	l.errorTableData = &logFile{filename: "errorTableData.log"}
 
 	return l, nil
 }
 
-// createLogFile 创建日志文件
-func (l *Logger) createLogFile(filename string) *logFile {
-	filePath := filepath.Join(l.timestampDir, filename)
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		log.Printf("警告: 创建日志文件 %s 失败: %v", filePath, err)
-		return &logFile{enabled: false}
-	}
-
-	return &logFile{
-		file:    file,
-		logger:  log.New(file, "", log.LstdFlags),
-		enabled: true,
-	}
+// getOrCreateLogFile 懒加载创建日志文件
+func (l *Logger) getOrCreateLogFile(lf *logFile) {
+	lf.once.Do(func() {
+		filePath := filepath.Join(l.timestampDir, lf.filename)
+		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Printf("警告: 创建日志文件 %s 失败: %v", filePath, err)
+			return
+		}
+		lf.file = file
+		lf.logger = log.New(file, "", log.LstdFlags)
+	})
 }
 
 // LogTableCreateFailed 记录表结构创建失败
@@ -165,7 +164,8 @@ func (l *Logger) LogTableDataError(tableName, sql, reason string) {
 
 // writeLog 写入日志
 func (l *Logger) writeLog(lf *logFile, msg string) {
-	if lf.enabled && lf.logger != nil {
+	l.getOrCreateLogFile(lf)
+	if lf.logger != nil {
 		lf.logger.Println(msg)
 	}
 }
