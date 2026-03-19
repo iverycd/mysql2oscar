@@ -120,7 +120,7 @@ const (
 // ChunkPlan 分片计划
 type ChunkPlan struct {
 	Strategy     ChunkStrategy
-	PKColumn     string        // 主键列名
+	PKColumns    []string      // 主键列名列表（支持复合主键）
 	MinValue     int64         // 主键最小值（仅整数主键）
 	MaxValue     int64         // 主键最大值（仅整数主键）
 	ChunkSize    int64         // 每个分片的大小

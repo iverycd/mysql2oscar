@@ -196,7 +196,7 @@ func (m *Migrator) planChunking(tableName string, totalRows int64) *types.ChunkP
 		return m.planOffsetChunking(tableName, totalRows, pkInfo, chunkSize)
 	}
 
-	log.Printf("[分片] 表 %s: 主键 '%s' 类型 '%s' 不支持分片，使用单线程", tableName, pkInfo.ColumnName, pkInfo.DataType)
+	log.Printf("[分片] 表 %s: 主键 %v 类型 %v 不支持分片，使用单线程", tableName, pkInfo.ColumnNames, pkInfo.DataTypes)
 	return plan
 }
 
@@ -204,12 +204,13 @@ func (m *Migrator) planChunking(tableName string, totalRows int64) *types.ChunkP
 func (m *Migrator) planIntegerChunking(tableName string, totalRows int64, pkInfo *mysql.PrimaryKeyInfo, chunkSize int64) *types.ChunkPlan {
 	plan := &types.ChunkPlan{
 		Strategy:  types.ChunkStrategyNone,
-		PKColumn:  pkInfo.ColumnName,
+		PKColumns: pkInfo.ColumnNames,
 		ChunkSize: chunkSize,
 	}
 
-	// 获取主键范围
-	minVal, maxVal, err := m.dataReader.GetPrimaryKeyRange(tableName, pkInfo.ColumnName)
+	// 获取主键范围（使用第一个主键列）
+	pkColumn := pkInfo.ColumnNames[0]
+	minVal, maxVal, err := m.dataReader.GetPrimaryKeyRange(tableName, pkColumn)
 	if err != nil {
 		log.Printf("[分片] 表 %s: 获取主键范围失败: %v", tableName, err)
 		return plan
@@ -252,7 +253,7 @@ func (m *Migrator) planIntegerChunking(tableName string, totalRows int64, pkInfo
 func (m *Migrator) planOffsetChunking(tableName string, totalRows int64, pkInfo *mysql.PrimaryKeyInfo, chunkSize int64) *types.ChunkPlan {
 	plan := &types.ChunkPlan{
 		Strategy:  types.ChunkStrategyNone,
-		PKColumn:  pkInfo.ColumnName,
+		PKColumns: pkInfo.ColumnNames,
 		ChunkSize: chunkSize,
 	}
 
@@ -411,7 +412,7 @@ func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string,
 
 					// 4. 处理分片数据
 					chunkRows = 0
-					chunkErr = m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumn,
+					chunkErr = m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumns[0],
 						chunk.Start, chunk.End, func(batch *types.DataBatch) error {
 							inserted, err := chunkDataWriter.InsertBatchWithRetry(tableName, batch, 5, reconnectFunc) // 增加批次重试次数到 5
 							if err != nil {
@@ -552,7 +553,7 @@ func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string
 
 					// 4. 处理分片数据
 					chunkRows = 0
-					chunkErr = m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumn,
+					chunkErr = m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumns,
 						chunk.Offset, chunk.Limit, func(batch *types.DataBatch) error {
 							inserted, err := chunkDataWriter.InsertBatchWithRetry(tableName, batch, 5, reconnectFunc) // 增加批次重试次数到 5
 							if err != nil {

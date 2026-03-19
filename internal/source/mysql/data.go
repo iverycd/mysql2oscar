@@ -347,10 +347,10 @@ func (r *DataReader) ReadTableDataByRange(tableName string, columns []string, pk
 	return nil
 }
 
-// ReadTableDataByOffset 按 OFFSET/LIMIT 读取表数据
-// 用于字符串主键的分片并行迁移
-func (r *DataReader) ReadTableDataByOffset(tableName string, columns []string, pkColumn string, offset, limit int64, callback func(batch *types.DataBatch) error) error {
-	// 构建查询
+// ReadTableDataByOffset 按 OFFSET/LIMIT 读取表数据（延迟关联方式）
+// 用于字符串主键的分片并行迁移，支持复合主键
+func (r *DataReader) ReadTableDataByOffset(tableName string, columns []string, pkColumns []string, offset, limit int64, callback func(batch *types.DataBatch) error) error {
+	// 构建列列表
 	columnList := "*"
 	if len(columns) > 0 {
 		columnList = ""
@@ -362,9 +362,21 @@ func (r *DataReader) ReadTableDataByOffset(tableName string, columns []string, p
 		}
 	}
 
-	// 使用 ORDER BY + OFFSET + LIMIT 进行分片
-	query := fmt.Sprintf("SELECT %s FROM `%s` ORDER BY `%s` LIMIT %d, %d",
-		columnList, tableName, pkColumn, offset, limit)
+	// 构建主键列表（用于 ORDER BY 和子查询 SELECT）
+	pkList := ""
+	for i, col := range pkColumns {
+		if i > 0 {
+			pkList += ", "
+		}
+		pkList += fmt.Sprintf("`%s`", col)
+	}
+
+	// 构建 JOIN 条件
+	joinCondition := buildJoinCondition(pkColumns)
+
+	// 延迟关联查询
+	query := fmt.Sprintf("SELECT t.* FROM (SELECT %s FROM `%s` ORDER BY %s LIMIT %d, %d) temp JOIN `%s` t ON %s",
+		pkList, tableName, pkList, offset, limit, tableName, joinCondition)
 
 	rows, err := r.client.db.Query(query)
 	if err != nil {
@@ -442,4 +454,14 @@ func (r *DataReader) ReadTableDataByOffset(tableName string, columns []string, p
 	}
 
 	return nil
+}
+
+// buildJoinCondition 构建 JOIN 条件（支持复合主键）
+// 例如: temp.`col1` = t.`col1` AND temp.`col2` = t.`col2`
+func buildJoinCondition(pkColumns []string) string {
+	conditions := make([]string, len(pkColumns))
+	for i, col := range pkColumns {
+		conditions[i] = fmt.Sprintf("temp.`%s` = t.`%s`", col, col)
+	}
+	return strings.Join(conditions, " AND ")
 }

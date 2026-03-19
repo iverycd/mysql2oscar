@@ -413,42 +413,62 @@ func (r *SchemaReader) GetAutoIncrementInfo() (map[string]AutoIncrementInfo, err
 	return result, nil
 }
 
-// PrimaryKeyInfo 主键信息
+// PrimaryKeyInfo 主键信息（支持复合主键）
 type PrimaryKeyInfo struct {
-	ColumnName string
-	DataType   string // 数据类型名称
-	IsInteger  bool   // 是否为整数类型
-	IsString   bool   // 是否为字符串类型
+	ColumnNames []string // 主键列名列表（支持复合主键）
+	DataTypes   []string // 对应的数据类型列表
+	IsInteger   bool     // 所有主键列是否都是整数类型
+	IsString    bool     // 所有主键列是否都是字符串类型
 }
 
-// GetPrimaryKeyInfo 获取表的主键信息
-// 返回主键列名、数据类型、是否为整数/字符串类型
+// GetPrimaryKeyInfo 获取表的主键信息（支持复合主键）
+// 返回所有主键列名、数据类型、是否为整数/字符串类型
 func (r *SchemaReader) GetPrimaryKeyInfo(tableName string) (*PrimaryKeyInfo, error) {
 	query := `
 		SELECT COLUMN_NAME, DATA_TYPE
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_KEY = 'PRI'
-		LIMIT 1
+		ORDER BY ORDINAL_POSITION
 	`
 
-	var columnName, dataType string
-	err := r.client.db.QueryRow(query, r.client.dbName, tableName).Scan(&columnName, &dataType)
+	rows, err := r.client.db.Query(query, r.client.dbName, tableName)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // 无主键
-		}
 		return nil, fmt.Errorf("查询主键信息失败: %w", err)
 	}
+	defer rows.Close()
 
-	// 判断主键类型
-	isInteger := isIntegerType(dataType)
-	isString := isStringType(dataType)
+	var columnNames []string
+	var dataTypes []string
+	allInteger := true
+	allString := true
+
+	for rows.Next() {
+		var columnName, dataType string
+		if err := rows.Scan(&columnName, &dataType); err != nil {
+			return nil, fmt.Errorf("扫描主键信息失败: %w", err)
+		}
+		columnNames = append(columnNames, columnName)
+		dataTypes = append(dataTypes, dataType)
+
+		// 更新类型判断
+		if !isIntegerType(dataType) {
+			allInteger = false
+		}
+		if !isStringType(dataType) {
+			allString = false
+		}
+	}
+
+	// 无主键
+	if len(columnNames) == 0 {
+		return nil, nil
+	}
 
 	return &PrimaryKeyInfo{
-		ColumnName: columnName,
-		DataType:   dataType,
-		IsInteger:  isInteger,
-		IsString:   isString,
+		ColumnNames: columnNames,
+		DataTypes:   dataTypes,
+		IsInteger:   allInteger,
+		IsString:    allString,
 	}, nil
 }
 
