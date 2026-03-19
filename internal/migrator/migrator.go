@@ -112,7 +112,7 @@ func New(cfg *config.Config) (*Migrator, error) {
 	}, nil
 }
 
-// SetSourceDB 设置源数据库��（用于视图转换）
+// SetSourceDB 设置源数据库（用于视图转换）
 func (m *Migrator) SetSourceDB(sourceDB string) {
 	m.viewConverter.SetSourceDB(sourceDB)
 }
@@ -188,7 +188,7 @@ func (m *Migrator) migrateSingleTable(tableName string, autoIncrInfoMap map[stri
 		if err := client.DropTable(tableName); err != nil {
 			result.err = err
 			result.errMsg = fmt.Sprintf("删除表失败: %v", err)
-			result.errSQL = fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", tableName)
+			result.errSQL = fmt.Sprintf("DROP TABLE IF EXISTS %s ", tableName)
 			return result
 		}
 	} else {
@@ -538,77 +538,99 @@ func (m *Migrator) migrateWithRangeChunking(tableName string, colNames []string,
 	var firstError error
 	var errorMutex sync.Mutex
 
-	// 启动 worker（每个 worker 使用独立的 Oscar 连接）
+	// 启动 worker（每个分片使用独立连接）
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 
-			// 为每个 worker 创建独立的 Oscar 连接（使用指针以便在闭包内修改）
-			workerClient, err := m.createTempClient()
-			if err != nil {
-				errorMutex.Lock()
-				if firstError == nil {
-					firstError = fmt.Errorf("worker %d 创建连接失败: %w", workerID, err)
-				}
-				errorMutex.Unlock()
-				return
-			}
-			defer workerClient.Close()
-
-			// 创建独立的 DataWriter（使用指针以便在闭包内修改）
-			workerDataWriter := oscar.NewDataWriter(workerClient)
-
-			// 定义重建连接函数（返回新的 Client）
-			reconnectFunc := func() (*oscar.Client, error) {
-				// 关闭旧连接
-				if workerClient != nil {
-					workerClient.Close()
-				}
-				// 创建新连接
-				newClient, err := m.createTempClient()
-				if err != nil {
-					return nil, err
-				}
-				workerClient = newClient
-				log.Printf("[Worker-%d] 重建连接成功", workerID)
-				return workerClient, nil
-			}
-
-			// worker 本地的行数计数器
-			var workerRows int64
-
 			for chunk := range chunkChan {
-				// 读取分片数据并写入
-				err := m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumn, chunk.Start, chunk.End, func(batch *types.DataBatch) error {
-					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3, reconnectFunc)
+				// ========== 每个分片独立连接 + 分片级别重试 ==========
+
+				var chunkRows int64
+				var chunkErr error
+				maxChunkRetries := 3 // 分片级别最大重试次数
+
+				for retry := 0; retry < maxChunkRetries; retry++ {
+					if retry > 0 {
+						log.Printf("[Worker-%d] 表 %s 分片[%d,%d) 第 %d 次重试...",
+							workerID, tableName, chunk.Start, chunk.End, retry)
+						time.Sleep(time.Duration(retry) * time.Second) // 指数退避
+					}
+
+					// 1. 创建分片独立连接
+					chunkClient, err := m.createTempClient()
 					if err != nil {
-						return err
+						chunkErr = err
+						continue // 连接创建失败，重试
 					}
-					workerRows += inserted
-					atomic.AddInt64(&totalRows, inserted)
 
-					// 每批次输出进度
-					if workerRows > 0 && workerRows%5000 == 0 {
-						log.Printf("[Worker-%d] 表 %s 分片[%d,%d): 已插入 %d 行", workerID, tableName, chunk.Start, chunk.End, workerRows)
+					// 2. 创建分片独立 DataWriter
+					chunkDataWriter := oscar.NewDataWriter(chunkClient)
+
+					// 3. 定义分片级别的重连函数
+					currentClient := chunkClient
+					reconnectFunc := func() (*oscar.Client, error) {
+						if currentClient != nil {
+							currentClient.Close()
+						}
+						newClient, err := m.createTempClient()
+						if err != nil {
+							return nil, err
+						}
+						currentClient = newClient
+						chunkDataWriter.SetClient(currentClient)
+						log.Printf("[Worker-%d][分片 %d,%d] 批次重连成功", workerID, chunk.Start, chunk.End)
+						return currentClient, nil
 					}
-					return nil
-				})
 
-				result := chunkResult{err: err}
+					// 4. 处理分片数据
+					chunkRows = 0
+					chunkErr = m.dataReader.ReadTableDataByRange(tableName, colNames, plan.PKColumn,
+						chunk.Start, chunk.End, func(batch *types.DataBatch) error {
+							inserted, err := chunkDataWriter.InsertBatchWithRetry(tableName, batch, 5, reconnectFunc) // 增加批次重试次数到 5
+							if err != nil {
+								return err
+							}
+							chunkRows += inserted
+							atomic.AddInt64(&totalRows, inserted)
+
+							if chunkRows > 0 && chunkRows%5000 == 0 {
+								log.Printf("[Worker-%d] 表 %s 分片[%d,%d): 已插入 %d 行",
+									workerID, tableName, chunk.Start, chunk.End, chunkRows)
+							}
+							return nil
+						})
+
+					// 5. 关闭分片连接
+					if currentClient != nil {
+						currentClient.Close()
+					}
+
+					// 6. 如果成功，跳出重试循环
+					if chunkErr == nil {
+						break
+					}
+
+					log.Printf("[Worker-%d] 表 %s 分片[%d,%d) 失败: %v",
+						workerID, tableName, chunk.Start, chunk.End, chunkErr)
+				}
+
+				result := chunkResult{rows: chunkRows, err: chunkErr}
 				resultChan <- result
 
-				if err != nil {
+				if chunkErr != nil {
 					errorMutex.Lock()
 					if firstError == nil {
-						firstError = fmt.Errorf("分片 [%d, %d) 失败: %w", chunk.Start, chunk.End, err)
+						firstError = fmt.Errorf("分片 [%d, %d) 失败 (重试 %d 次后): %w",
+							chunk.Start, chunk.End, maxChunkRetries, chunkErr)
 					}
 					errorMutex.Unlock()
 					return
 				}
 
-				// 分片完成日志
-				log.Printf("[Worker-%d] 表 %s 分片[%d,%d) 完成: %d 行", workerID, tableName, chunk.Start, chunk.End, workerRows)
+				log.Printf("[Worker-%d] 表 %s 分片[%d,%d) 完成: %d 行",
+					workerID, tableName, chunk.Start, chunk.End, chunkRows)
 			}
 		}(i)
 	}
@@ -657,77 +679,99 @@ func (m *Migrator) migrateWithOffsetChunking(tableName string, colNames []string
 	var firstError error
 	var errorMutex sync.Mutex
 
-	// 启动 worker（每个 worker 使用独立的 Oscar 连接）
+	// 启动 worker（每个分片使用独立连接）
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 
-			// 为每个 worker 创建独立的 Oscar 连接（使用指针以便在闭包内修改）
-			workerClient, err := m.createTempClient()
-			if err != nil {
-				errorMutex.Lock()
-				if firstError == nil {
-					firstError = fmt.Errorf("worker %d 创建连接失败: %w", workerID, err)
-				}
-				errorMutex.Unlock()
-				return
-			}
-			defer workerClient.Close()
-
-			// 创建独立的 DataWriter（使用指针以便在闭包内修改）
-			workerDataWriter := oscar.NewDataWriter(workerClient)
-
-			// 定义重建连接函数（���回新的 Client）
-			reconnectFunc := func() (*oscar.Client, error) {
-				// 关闭旧连接
-				if workerClient != nil {
-					workerClient.Close()
-				}
-				// 创建新连接
-				newClient, err := m.createTempClient()
-				if err != nil {
-					return nil, err
-				}
-				workerClient = newClient
-				log.Printf("[Worker-%d] 重建连接成功", workerID)
-				return workerClient, nil
-			}
-
-			// worker 本地的行数计数器
-			var workerRows int64
-
 			for chunk := range chunkChan {
-				// 读取分片数据并写入
-				err := m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumn, chunk.Offset, chunk.Limit, func(batch *types.DataBatch) error {
-					inserted, err := workerDataWriter.InsertBatchWithRetry(tableName, batch, 3, reconnectFunc)
+				// ========== 每个分片独立连接 + 分片级别重试 ==========
+
+				var chunkRows int64
+				var chunkErr error
+				maxChunkRetries := 3 // 分片级别最大重试次数
+
+				for retry := 0; retry < maxChunkRetries; retry++ {
+					if retry > 0 {
+						log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d) 第 %d 次重试...",
+							workerID, tableName, chunk.ChunkID, chunk.Offset, retry)
+						time.Sleep(time.Duration(retry) * time.Second) // 指数退避
+					}
+
+					// 1. 创建分片独立连接
+					chunkClient, err := m.createTempClient()
 					if err != nil {
-						return err
+						chunkErr = err
+						continue // 连接创建失败，重试
 					}
-					workerRows += inserted
-					atomic.AddInt64(&totalRows, inserted)
 
-					// 每批次输出进度
-					if workerRows > 0 && workerRows%5000 == 0 {
-						log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d): 已插入 %d 行", workerID, tableName, chunk.ChunkID, chunk.Offset, workerRows)
+					// 2. 创建分片独立 DataWriter
+					chunkDataWriter := oscar.NewDataWriter(chunkClient)
+
+					// 3. 定义分片级别的重连函数
+					currentClient := chunkClient
+					reconnectFunc := func() (*oscar.Client, error) {
+						if currentClient != nil {
+							currentClient.Close()
+						}
+						newClient, err := m.createTempClient()
+						if err != nil {
+							return nil, err
+						}
+						currentClient = newClient
+						chunkDataWriter.SetClient(currentClient)
+						log.Printf("[Worker-%d][分片#%d] 批次重连成功", workerID, chunk.ChunkID)
+						return currentClient, nil
 					}
-					return nil
-				})
 
-				result := chunkResult{chunkID: chunk.ChunkID, err: err}
+					// 4. 处理分片数据
+					chunkRows = 0
+					chunkErr = m.dataReader.ReadTableDataByOffset(tableName, colNames, plan.PKColumn,
+						chunk.Offset, chunk.Limit, func(batch *types.DataBatch) error {
+							inserted, err := chunkDataWriter.InsertBatchWithRetry(tableName, batch, 5, reconnectFunc) // 增加批次重试次数到 5
+							if err != nil {
+								return err
+							}
+							chunkRows += inserted
+							atomic.AddInt64(&totalRows, inserted)
+
+							if chunkRows > 0 && chunkRows%5000 == 0 {
+								log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d): 已插入 %d 行",
+									workerID, tableName, chunk.ChunkID, chunk.Offset, chunkRows)
+							}
+							return nil
+						})
+
+					// 5. 关闭分片连接
+					if currentClient != nil {
+						currentClient.Close()
+					}
+
+					// 6. 如果成功，跳出重试循环
+					if chunkErr == nil {
+						break
+					}
+
+					log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d) 失败: %v",
+						workerID, tableName, chunk.ChunkID, chunk.Offset, chunkErr)
+				}
+
+				result := chunkResult{chunkID: chunk.ChunkID, rows: chunkRows, err: chunkErr}
 				resultChan <- result
 
-				if err != nil {
+				if chunkErr != nil {
 					errorMutex.Lock()
 					if firstError == nil {
-						firstError = fmt.Errorf("偏移分片 %d (offset=%d) 失败: %w", chunk.ChunkID, chunk.Offset, err)
+						firstError = fmt.Errorf("偏移分片 %d (offset=%d) 失败 (重试 %d 次后): %w",
+							chunk.ChunkID, chunk.Offset, maxChunkRetries, chunkErr)
 					}
 					errorMutex.Unlock()
 					return
 				}
 
-				// 分片完成日志
-				log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d) 完成: %d 行", workerID, tableName, chunk.ChunkID, chunk.Offset, workerRows)
+				log.Printf("[Worker-%d] 表 %s 分片#%d(offset=%d) 完成: %d 行",
+					workerID, tableName, chunk.ChunkID, chunk.Offset, chunkRows)
 			}
 		}(i)
 	}
@@ -934,10 +978,10 @@ func (m *Migrator) migrateViews() *types.MigrationResult {
 		view.Definition = m.viewConverter.ConvertViewSQL(view.Definition)
 
 		// 检查视图是否存在
-		exists, _ := client.TableExists(viewName)
-		if exists {
-			client.DropView(viewName)
-		}
+		//exists, _ := client.TableExists(viewName)
+		//if exists {
+		//	client.DropView(viewName)
+		//}
 
 		// 创建视图
 		sql, err := schemaWriter.CreateView(view)

@@ -132,7 +132,7 @@ func (c *Client) TableExists(tableName string) (bool, error) {
 
 // DropTable 删除表
 func (c *Client) DropTable(tableName string) error {
-	query := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", c.quoteIdentifier(tableName))
+	query := fmt.Sprintf("DROP TABLE IF EXISTS %s", c.quoteIdentifier(tableName))
 	_, err := c.Exec(query)
 	return err
 }
