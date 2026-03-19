@@ -215,12 +215,12 @@ func getMySQLRowCount(db *sql.DB, tableName string) (int64, error) {
 // getOscarRowCount 获取 Oscar 表行数
 func getOscarRowCount(db *sql.DB, tableName string) (int64, error) {
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tableName)
-	var count int64
+	var count float64
 	err := db.QueryRow(query).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("获取行数失败: %w", err)
 	}
-	return count, nil
+	return int64(count), nil
 }
 
 // printReport 打印比对报告
