@@ -85,6 +85,15 @@ type MigrationResult struct {
 	TotalTime      time.Duration
 	FailedTables   []string
 	FailedViews    []string
+
+	// 索引/约束/自增列统计
+	IndexesSuccess     int      // 索引创建成功数
+	IndexesFailed      int      // 索引创建失败数
+	ConstraintsSuccess int      // 约束(主键+外键)创建成功数
+	ConstraintsFailed  int      // 约束创建失败数
+	AutoIncrSuccess    int      // 自增列设置成功数
+	AutoIncrFailed     int      // 自增列设置失败数
+	FailedDataTables   []string // 数据插入失败的表名列表
 }
 
 // ChunkMetadata 表示分片元数据

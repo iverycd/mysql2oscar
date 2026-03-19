@@ -64,6 +64,8 @@ func main() {
 	fmt.Println("\n迁移完成!")
 	fmt.Printf("  表迁移: 成功 %d, 失败 %d\n", result.TablesMigrated, result.TablesFailed)
 	fmt.Printf("  视图迁移: 成功 %d, 失败 %d\n", result.ViewsMigrated, result.ViewsFailed)
+	fmt.Printf("  索引/约束: 成功 %d, 失败 %d\n", result.IndexesSuccess+result.ConstraintsSuccess, result.IndexesFailed+result.ConstraintsFailed)
+	fmt.Printf("  自增列: 成功 %d, 失败 %d\n", result.AutoIncrSuccess, result.AutoIncrFailed)
 	fmt.Printf("  总行数: %d\n", result.TotalRows)
 	fmt.Printf("  总耗时: %v\n", result.TotalTime)
 
@@ -78,6 +80,13 @@ func main() {
 		fmt.Println("\n失败的视图:")
 		for _, v := range result.FailedViews {
 			fmt.Printf("  - %s\n", v)
+		}
+	}
+
+	if len(result.FailedDataTables) > 0 {
+		fmt.Println("\n数据插入失败的表:")
+		for _, t := range result.FailedDataTables {
+			fmt.Printf("  - %s\n", t)
 		}
 	}
 }

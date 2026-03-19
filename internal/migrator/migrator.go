@@ -688,6 +688,7 @@ func (m *Migrator) Migrate() (*types.MigrationResult, error) {
 	for _, dr := range dataResults {
 		if dr.err != nil {
 			m.logger.LogTableDataError(dr.tableName, "", dr.errMsg)
+			result.FailedDataTables = append(result.FailedDataTables, dr.tableName)
 		} else {
 			result.TotalRows += dr.rowCount
 		}
@@ -695,7 +696,25 @@ func (m *Migrator) Migrate() (*types.MigrationResult, error) {
 
 	// ========== 第三阶段: 创建索引/约束/自增列 ==========
 	log.Printf("========== 第三阶段: 创建索引/约束/自增列 ==========")
-	m.createAllPostDataObjects(successfulTables, autoIncrInfoMap)
+	postDataResult := m.createAllPostDataObjects(successfulTables, autoIncrInfoMap)
+
+	// 统计第三阶段结果
+	// 主键属于约束，成功/失败各计1
+	if postDataResult.pkSuccess {
+		result.ConstraintsSuccess++
+	}
+	if postDataResult.pkFailed {
+		result.ConstraintsFailed++
+	}
+	// 索引
+	result.IndexesSuccess += postDataResult.indexesSuccess
+	result.IndexesFailed += postDataResult.indexesFailed
+	// 外键属于约束
+	result.ConstraintsSuccess += postDataResult.fkSuccess
+	result.ConstraintsFailed += postDataResult.fkFailed
+	// 自增列
+	result.AutoIncrSuccess += postDataResult.autoIncrSuccess
+	result.AutoIncrFailed += postDataResult.autoIncrFailed
 
 	// ========== 第四阶段: 迁移视图 ==========
 	if m.cfg.Migration.MigrateViews {
@@ -737,6 +756,19 @@ type tableDataResult struct {
 	err       error
 	errMsg    string
 	elapsed   time.Duration
+}
+
+// postDataResult 后数据对象创建结果
+type postDataResult struct {
+	tableName       string
+	pkSuccess       bool // 主键创建成功
+	pkFailed        bool // 主键创建失败
+	indexesSuccess  int  // 索引创建成功数
+	indexesFailed   int  // 索引创建失败数
+	fkSuccess       int  // 外键创建成功数
+	fkFailed        int  // 外键创建失败数
+	autoIncrSuccess int  // 自增列设置成功数
+	autoIncrFailed  int  // 自增列设置失败数
 }
 
 // ========== 第一阶段: 创建所有表结构 ==========
@@ -968,16 +1000,18 @@ func (m *Migrator) migrateTableDataOnly(tableName string) *tableDataResult {
 // ========== 第三阶段: 创建索引/约束/自增列 ==========
 
 // createAllPostDataObjects 第三阶段：串行创建索引、约束、自增列
-func (m *Migrator) createAllPostDataObjects(tables []string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo) {
+func (m *Migrator) createAllPostDataObjects(tables []string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo) *postDataResult {
+	totalResult := &postDataResult{}
+
 	if len(tables) == 0 {
-		return
+		return totalResult
 	}
 
 	// 创建单个连接
 	client, err := m.createTempClient()
 	if err != nil {
 		log.Printf("[错误] 创建 Oscar 连接失败: %v", err)
-		return
+		return totalResult
 	}
 	defer client.Close()
 
@@ -985,12 +1019,29 @@ func (m *Migrator) createAllPostDataObjects(tables []string, autoIncrInfoMap map
 
 	for i, tableName := range tables {
 		log.Printf("[%d/%d] 创建索引/约束: %s", i+1, len(tables), tableName)
-		m.createSingleTablePostDataObjects(tableName, autoIncrInfoMap, schemaWriter)
+		result := m.createSingleTablePostDataObjects(tableName, autoIncrInfoMap, schemaWriter)
+		// 汇总统计
+		if result.pkSuccess {
+			totalResult.pkSuccess = true
+		}
+		if result.pkFailed {
+			totalResult.pkFailed = true
+		}
+		totalResult.indexesSuccess += result.indexesSuccess
+		totalResult.indexesFailed += result.indexesFailed
+		totalResult.fkSuccess += result.fkSuccess
+		totalResult.fkFailed += result.fkFailed
+		totalResult.autoIncrSuccess += result.autoIncrSuccess
+		totalResult.autoIncrFailed += result.autoIncrFailed
 	}
+
+	return totalResult
 }
 
 // createSingleTablePostDataObjects 创建单个表的后数据对象（主键、索引、外键、自增列）
-func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo, schemaWriter *oscar.SchemaWriter) {
+func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrInfoMap map[string]mysql.AutoIncrementInfo, schemaWriter *oscar.SchemaWriter) *postDataResult {
+	result := &postDataResult{tableName: tableName}
+
 	// 获取缓存的表结构
 	m.tableSchemasMu.RLock()
 	table, ok := m.tableSchemas[tableName]
@@ -998,7 +1049,7 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 
 	if !ok {
 		log.Printf("[警告] 表 %s: 表结构未找到，跳过后数据对象创建", tableName)
-		return
+		return result
 	}
 
 	// 1. 创建主键
@@ -1008,8 +1059,10 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 			if err != nil {
 				m.logger.LogIndexCreateFailed(tableName, "PRIMARY", sql, err.Error())
 				log.Printf("[警告] 表 %s: 添加主键失败: %v", tableName, err)
+				result.pkFailed = true
 			} else {
 				log.Printf("[完成] 表 %s: 添加主键 (%s)", tableName, idx.Name)
+				result.pkSuccess = true
 			}
 			break // 每个表只有一个主键
 		}
@@ -1021,10 +1074,12 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 		for _, fi := range failedIndexes {
 			m.logger.LogIndexCreateFailed(tableName, fi.IndexName, fi.SQL, fi.Err.Error())
 		}
+		result.indexesSuccess = len(table.Indexes) - len(failedIndexes)
+		result.indexesFailed = len(failedIndexes)
 		if len(failedIndexes) == 0 {
 			log.Printf("[完成] 表 %s: 创建了 %d 个索引", tableName, len(table.Indexes))
 		} else {
-			log.Printf("[部分完成] 表 %s: 成功 %d 个索引, 失败 %d 个索引", tableName, len(table.Indexes)-len(failedIndexes), len(failedIndexes))
+			log.Printf("[部分完成] 表 %s: 成功 %d 个索引, 失败 %d 个索引", tableName, result.indexesSuccess, result.indexesFailed)
 		}
 	}
 
@@ -1034,9 +1089,12 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 			sql, err := schemaWriter.CreateSingleForeignKey(tableName, fk)
 			if err != nil {
 				m.logger.LogFkCreateFailed(tableName, fk.Name, sql, err.Error())
+				result.fkFailed++
+			} else {
+				result.fkSuccess++
 			}
 		}
-		log.Printf("[完成] 表 %s: 处理了 %d 个外键", tableName, len(table.ForeignKeys))
+		log.Printf("[完成] 表 %s: 处理了 %d 个外键 (成功: %d, 失败: %d)", tableName, len(table.ForeignKeys), result.fkSuccess, result.fkFailed)
 	}
 
 	// 4. 设置自增列（如果有）
@@ -1055,6 +1113,7 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 			if err != nil {
 				m.logger.LogAutoIncrFailed(tableName, col.Name, sql, fmt.Sprintf("创建序列失败: %v", err))
 				log.Printf("[警告] 表 %s 自增列 %s: 创建序列失败: %v", tableName, col.Name, err)
+				result.autoIncrFailed++
 				continue
 			}
 
@@ -1063,12 +1122,16 @@ func (m *Migrator) createSingleTablePostDataObjects(tableName string, autoIncrIn
 			if err != nil {
 				m.logger.LogAutoIncrFailed(tableName, col.Name, sql, fmt.Sprintf("设置列默认值为序列失败: %v", err))
 				log.Printf("[警告] 表 %s 自增列 %s: 设置默认值失败: %v", tableName, col.Name, err)
+				result.autoIncrFailed++
 				continue
 			}
 
+			result.autoIncrSuccess++
 			log.Printf("[完成] 表 %s 自增列 %s 设置成功 (起始值: %d)", tableName, col.Name, startValue)
 		}
 	}
+
+	return result
 }
 
 // ========== 辅助函数 ==========
