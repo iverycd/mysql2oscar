@@ -32,7 +32,7 @@ type Migrator struct {
 	targetDatabase string
 
 	// 迁移过程跟踪
-	failedTableCreate sync.Map       // 表结构创建失败的表（线程��全）
+	failedTableCreate sync.Map       // 表结构创建失败的表（线程安全）
 	autoIncrColumns   []autoIncrInfo // 需要设置自增的列信息
 	autoIncrMutex     sync.Mutex     // 保护 autoIncrColumns
 

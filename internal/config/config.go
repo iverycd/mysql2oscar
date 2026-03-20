@@ -91,7 +91,7 @@ func setDefaults(cfg *Config) {
 		cfg.Migration.BatchSize = 1000
 	}
 	// 分片配置默认值
-	// 注意：EnableChunking 默认为 false（零值），需要在加载���显式设置为 true
+	// 注意：EnableChunking 默认为 false（零值），启用需要显式设置为 true
 	// 这里通过检查 ChunkSize == 0 来判断是否需要设置默认值
 	if cfg.Migration.ChunkSize == 0 {
 		cfg.Migration.ChunkSize = 10000
@@ -102,21 +102,5 @@ func setDefaults(cfg *Config) {
 	if cfg.Migration.ChunkThreshold == 0 {
 		cfg.Migration.ChunkThreshold = 50000
 	}
-	// EnableChunking 默认启用（yaml 中未指定时为零值 false）
-	// 如果配置文件中未显式设置，我们默认启用分片
-	// 这里通过一个技巧：如果配置文件中没有 enable_chunking 字段，
-	// 且 chunk_size 等都有默认值，则默认启用分片
-	// 但由于 yaml 解析无法区分"未设置"和"设置为 false"，
-	// 我们采用另一个策略：只有当 ChunkSize 被设置时才默认启用
-	// 为简化，这里默认启用分片
-	// 由于零值是 false，我们无法在 setDefaults 中判断用户是否显式设置为 false
-	// 因此改变设计：默认启用分片，用户需要显式设置 enable_chunking: false 来禁用
-	// 但 yaml 解析后零值为 false，所以这里需要特殊处理
-	// 解决方案：使用指针类型或自定义解析，但为简化，我们约定：
-	// - 如果用户想要禁用分片，设置 chunk_size = -1 或 chunk_parallelism = 0
-	// - 或者更简单：默认启用，用户设置 enable_chunking: false 禁用
-	// 由于 bool 零值是 false，我们无法区分"未设置"和"设置为 false"
-	// 所以这里采用：默认启用（设置为零值 true），但 bool 的零值是 false
-	// 最佳方案：启用分片（在配置文件中未指定时，根据其他条件判断）
-	// 这里简化：默认不启用，用户需要在配置中设置 enable_chunking: true
+
 }

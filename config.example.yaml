@@ -21,15 +21,20 @@ target:
 migration:
   # 要迁移的表列表，为空表示迁移整个数据库
   tables:
-  #    - file_tbl
-  #    - scores
+  #    - test_data
+  #    - test_data2
   # 是否迁移视图
   migrate_views: true
   # 是否迁移索引
   migrate_indexes: true
   # 并行处理数
-  parallelism: 4
+  parallelism: 8
   # 数据批处理大小
-  batch_size: 1000
+  batch_size: 200
   # 是否覆盖已存在的表
-  overwrite: false
+  overwrite: true
+  # 新增：分片配置                                                                                                                                     │
+  enable_chunking: true   # 是否启用分片（默认 true）                                                                                                  │
+  chunk_size: 10000       # 每个分片的行数（默认 10000）                                                                                               │
+  chunk_parallelism: 8    # 单表内分片并行度（默认 2）                                                                                                 │
+  chunk_threshold: 50000  # 启用分片的阈值行数（默认 50000）
