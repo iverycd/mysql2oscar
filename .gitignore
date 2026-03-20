@@ -1,5 +1,5 @@
 .idea
 config.yaml
-example
-go-aci
+example/log
+example/conn_mysql.go
 *.zip
