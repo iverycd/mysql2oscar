@@ -12,12 +12,14 @@ import (
 
 // Client Oscar 数据库客户端
 type Client struct {
-	db *sql.DB
+	db           *sql.DB
+	useUppercase bool
 }
 
 // NewClient 创建 Oscar 客户端
 // maxConns: 最大连接数，应设置为 parallelism + 缓冲
-func NewClient(host, username, password, database string, port int, maxConns int) (*Client, error) {
+// useUppercase: 是否使用大写标识符
+func NewClient(host, username, password, database string, port int, maxConns int, useUppercase bool) (*Client, error) {
 	// 构建连接字符串,debug参数：?trace_level=3&trace_file_path='/tmp/log/'
 	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
 
@@ -38,13 +40,15 @@ func NewClient(host, username, password, database string, port int, maxConns int
 	db.SetConnMaxIdleTime(10 * time.Minute) // 空闲连接最大存活时间
 
 	return &Client{
-		db: db,
+		db:           db,
+		useUppercase: useUppercase,
 	}, nil
 }
 
 // NewTempClient 创建临时连接（不使用连接池，用于表级别迁移）
 // 每次迁移完一个表后关闭，避免连接长时间复用导致失效
-func NewTempClient(host, username, password, database string, port int) (*Client, error) {
+// useUppercase: 是否使用大写标识符
+func NewTempClient(host, username, password, database string, port int, useUppercase bool) (*Client, error) {
 	// 构建连接字符串（不使用 trace 减少日志输出）
 	connStr := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
 
@@ -64,7 +68,7 @@ func NewTempClient(host, username, password, database string, port int) (*Client
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0) // 由调用方控制生命周期
 
-	return &Client{db: db}, nil
+	return &Client{db: db, useUppercase: useUppercase}, nil
 }
 
 // Close 关闭连接
@@ -144,8 +148,11 @@ func (c *Client) DropView(viewName string) error {
 	return err
 }
 
-// quoteIdentifier 引用标识符（转为小写）
+// quoteIdentifier 引用标识符（根据配置转为大写或小写）
 func (c *Client) quoteIdentifier(name string) string {
 	// Oscar 使用双引号引用标识符
+	if c.useUppercase {
+		return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	}
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
 }

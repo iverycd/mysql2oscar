@@ -13,12 +13,16 @@ import (
 
 // SchemaWriter 表结构写入器
 type SchemaWriter struct {
-	client *Client
+	client       *Client
+	useUppercase bool
 }
 
 // NewSchemaWriter 创建表结构写入器
 func NewSchemaWriter(client *Client) *SchemaWriter {
-	return &SchemaWriter{client: client}
+	return &SchemaWriter{
+		client:       client,
+		useUppercase: client.useUppercase,
+	}
 }
 
 // SetClient 设置客户端连接（用于连接断开后重建连接）
@@ -103,8 +107,8 @@ func (w *SchemaWriter) AddPrimaryKey(tableName string, columns []string) (string
 // DropSequence 删除序列
 // 返回生成的 SQL 语句和可能的错误
 func (w *SchemaWriter) DropSequence(tableName, columnName string) (string, error) {
-	// 序列名称格式：seq_表名_列名（全小写）
-	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	// 序列名称格式：seq_表名_列名（根据配置使用大写或小写）
+	seqName := w.generateSequenceName(tableName, columnName)
 	sql := fmt.Sprintf("DROP SEQUENCE IF EXISTS %s", w.quoteIdentifier(seqName))
 
 	if _, err := w.client.Exec(sql); err != nil {
@@ -118,8 +122,8 @@ func (w *SchemaWriter) DropSequence(tableName, columnName string) (string, error
 // startValue: 序列起始值（从MySQL的Auto_increment获取）
 // 返回生成的 SQL 语句和可能的错误
 func (w *SchemaWriter) CreateSequence(tableName, columnName string, startValue int64) (string, error) {
-	// 序列名称格式：seq_表名_列名（全小写）
-	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	// 序列名称格式：seq_表名_列名（根据配置使用大写或小写）
+	seqName := w.generateSequenceName(tableName, columnName)
 	sql := fmt.Sprintf("CREATE SEQUENCE %s INCREMENT BY 1 START %d",
 		w.quoteIdentifier(seqName), startValue)
 
@@ -133,13 +137,20 @@ func (w *SchemaWriter) CreateSequence(tableName, columnName string, startValue i
 // SetColumnDefaultSequence 设置列的默认值为序列的下一个值
 // 返回生成的 SQL 语句和可能的错误
 func (w *SchemaWriter) SetColumnDefaultSequence(tableName, columnName string) (string, error) {
-	// 序列名称格式：seq_表名_列名（全小写）
-	seqName := fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
+	// 序列名称格式：seq_表名_列名（根据配置使用大写或小写）
+	seqName := w.generateSequenceName(tableName, columnName)
 	// 神通数据库语法：ALTER TABLE 表名 ALTER COLUMN 列名 SET DEFAULT nextval('序列名')
+	// nextval 参数需要与序列名大小写一致
+	var seqNameForNextval string
+	if w.useUppercase {
+		seqNameForNextval = strings.ToUpper(seqName)
+	} else {
+		seqNameForNextval = strings.ToLower(seqName)
+	}
 	sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT nextval('%s')",
 		w.quoteIdentifier(tableName),
 		w.quoteIdentifier(columnName),
-		strings.ToLower(seqName))
+		seqNameForNextval)
 
 	if _, err := w.client.Exec(sql); err != nil {
 		return sql, fmt.Errorf("设置列默认值为序列失败: %w", err)
@@ -470,9 +481,21 @@ func (w *SchemaWriter) formatDefault(value string) string {
 	return fmt.Sprintf("'%s'", strings.ReplaceAll(value, "'", "''"))
 }
 
-// quoteIdentifier 引用标识符（转为小写）
+// quoteIdentifier 引用标识符（根据配置转为大写或小写）
 func (w *SchemaWriter) quoteIdentifier(name string) string {
+	if w.useUppercase {
+		return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	}
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
+}
+
+// generateSequenceName 生成序列名称
+// 格式：seq_表名_列名（根据配置使用大写或小写）
+func (w *SchemaWriter) generateSequenceName(tableName, columnName string) string {
+	if w.useUppercase {
+		return fmt.Sprintf("SEQ_%s_%s", strings.ToUpper(tableName), strings.ToUpper(columnName))
+	}
+	return fmt.Sprintf("seq_%s_%s", strings.ToLower(tableName), strings.ToLower(columnName))
 }
 
 // generateIndexName 生成索引名称
@@ -492,12 +515,20 @@ func (w *SchemaWriter) generateIndexName(tableName, columnName string) string {
 
 	// 生成5位随机数字与英文字母组合
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var charset string
+	if w.useUppercase {
+		charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	} else {
+		charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	}
 	randomStr := make([]byte, 5)
 	for i := range randomStr {
 		randomStr[i] = charset[r.Intn(len(charset))]
 	}
 
-	// 转为小写
+	// 根据配置使用大写或小写
+	if w.useUppercase {
+		return fmt.Sprintf("IDX_%s_%s_%s", strings.ToUpper(tablePrefix), strings.ToUpper(colPrefix), randomStr)
+	}
 	return fmt.Sprintf("idx_%s_%s_%s", strings.ToLower(tablePrefix), strings.ToLower(colPrefix), randomStr)
 }

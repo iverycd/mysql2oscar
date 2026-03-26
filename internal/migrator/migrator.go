@@ -30,6 +30,7 @@ type Migrator struct {
 	targetUsername string
 	targetPassword string
 	targetDatabase string
+	useUppercase   bool // 是否使用大写标识符
 
 	// 迁移过程跟踪
 	failedTableCreate sync.Map       // 表结构创建失败的表（线程安全）
@@ -89,6 +90,7 @@ func New(cfg *config.Config) (*Migrator, error) {
 		cfg.Target.Password,
 		cfg.Target.Database,
 		cfg.Target.Port,
+		cfg.Migration.UseUppercase,
 	)
 	if err != nil {
 		mysqlClient.Close()
@@ -113,6 +115,7 @@ func New(cfg *config.Config) (*Migrator, error) {
 		targetUsername: cfg.Target.Username,
 		targetPassword: cfg.Target.Password,
 		targetDatabase: cfg.Target.Database,
+		useUppercase:   cfg.Migration.UseUppercase,
 		// 表结构缓存
 		tableSchemas: make(map[string]*types.Table),
 	}, nil
@@ -131,6 +134,7 @@ func (m *Migrator) createTempClient() (*oscar.Client, error) {
 		m.targetPassword,
 		m.targetDatabase,
 		m.targetPort,
+		m.useUppercase,
 	)
 }
 

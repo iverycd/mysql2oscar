@@ -119,6 +119,7 @@ func compareTableCounts(cfg *config.Config) (*CountReport, error) {
 		cfg.Target.Database,
 		cfg.Target.Port,
 		2, // 只需要少量连接
+		cfg.Migration.UseUppercase,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("连接 Oscar 失败: %w", err)
@@ -140,7 +141,7 @@ func compareTableCounts(cfg *config.Config) (*CountReport, error) {
 
 	// 逐表比对
 	for _, tableName := range tables {
-		result := compareSingleTable(tableName, mysqlDB, oscarDB)
+		result := compareSingleTable(tableName, mysqlDB, oscarDB, cfg.Migration.UseUppercase)
 		report.Results = append(report.Results, result)
 
 		if result.Error != "" {
@@ -173,7 +174,7 @@ func getTableList(cfg *config.Config, mysqlClient *mysql.Client) ([]string, erro
 }
 
 // compareSingleTable 比对单个表的行数
-func compareSingleTable(tableName string, mysqlDB *sql.DB, oscarDB *sql.DB) TableCountResult {
+func compareSingleTable(tableName string, mysqlDB *sql.DB, oscarDB *sql.DB, useUppercase bool) TableCountResult {
 	result := TableCountResult{
 		TableName: tableName,
 	}
@@ -186,8 +187,14 @@ func compareSingleTable(tableName string, mysqlDB *sql.DB, oscarDB *sql.DB) Tabl
 	}
 	result.SourceCount = sourceCount
 
-	// 获取 Oscar 行数（表名转小写）
-	targetCount, err := getOscarRowCount(oscarDB, strings.ToLower(tableName))
+	// 获取 Oscar 行数（根据配置转换大小写）
+	var oscarTableName string
+	if useUppercase {
+		oscarTableName = strings.ToUpper(tableName)
+	} else {
+		oscarTableName = strings.ToLower(tableName)
+	}
+	targetCount, err := getOscarRowCount(oscarDB, oscarTableName)
 	if err != nil {
 		result.Error = fmt.Sprintf("Oscar: %v", err)
 		return result

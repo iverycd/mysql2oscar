@@ -56,6 +56,11 @@ type MigrationConfig struct {
 	ChunkParallelism int `yaml:"chunk_parallelism"`
 	// 启用分片的阈值行数，小于此值的表不分片（默认 50000）
 	ChunkThreshold int64 `yaml:"chunk_threshold"`
+
+	// 是否使用大写标识符（表名、列名、索引名、序列名、外键名等）
+	// false: 使用小写（默认）
+	// true: 使用大写
+	UseUppercase bool `yaml:"use_uppercase"`
 }
 
 // Load 从文件加载配置

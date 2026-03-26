@@ -33,8 +33,12 @@ migration:
   batch_size: 200
   # 是否覆盖已存在的表
   overwrite: true
-  # 新增：分片配置                                                                                                                                     │
-  enable_chunking: true   # 是否启用分片（默认 true）                                                                                                  │
-  chunk_size: 10000       # 每个分片的行数（默认 10000）                                                                                               │
-  chunk_parallelism: 8    # 单表内分片并行度（默认 2）                                                                                                 │
+  # 新增：分片配置
+  enable_chunking: true   # 是否启用分片（默认 true）
+  chunk_size: 10000       # 每个分片的行数（默认 10000）
+  chunk_parallelism: 8    # 单表内分片并行度（默认 2）
   chunk_threshold: 50000  # 启用分片的阈值行数（默认 50000）
+  # 是否使用大写标识符（表名、列名、索引名、序列名、外键名等）
+  # false: 使用小写（默认）
+  # true: 使用大写
+  use_uppercase: true

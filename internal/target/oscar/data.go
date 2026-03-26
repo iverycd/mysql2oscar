@@ -10,12 +10,16 @@ import (
 
 // DataWriter 数据写入器
 type DataWriter struct {
-	client *Client
+	client       *Client
+	useUppercase bool
 }
 
 // NewDataWriter 创建数据写入器
 func NewDataWriter(client *Client) *DataWriter {
-	return &DataWriter{client: client}
+	return &DataWriter{
+		client:       client,
+		useUppercase: client.useUppercase,
+	}
 }
 
 // InsertBatch 批量插入数据
@@ -140,8 +144,11 @@ func (w *DataWriter) GetRowCount(tableName string) (int64, error) {
 	return count, nil
 }
 
-// quoteIdentifier 引用标识符（转为小写）
+// quoteIdentifier 引用标识符（根据配置转为大写或小写）
 func (w *DataWriter) quoteIdentifier(name string) string {
+	if w.useUppercase {
+		return fmt.Sprintf(`"%s"`, strings.ToUpper(name))
+	}
 	return fmt.Sprintf(`"%s"`, strings.ToLower(name))
 }
 
